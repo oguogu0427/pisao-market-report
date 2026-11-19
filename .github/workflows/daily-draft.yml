@@ -9,58 +9,70 @@ on:
 jobs:
   publish-draft:
     runs-on: ubuntu-latest
-    steps:
-      - name: Install Python packages
-        run: pip install requests
 
-      - name: Generate and post market report
+    steps:
+      - name: Publish market report
         env:
-          HATENA_API_KEY: ${{ secrets.OWNER_API_KEY }}
+          OWNER_API_KEY: ${{ secrets.OWNER_API_KEY }}
           BLOG_DOMAIN: ${{ secrets.BLOG_DOMAIN }}
         run: |
           python - <<'PY'
           import os
-          import requests
+          import json
+          import base64
+          import urllib.request
+          import urllib.error
           import xml.etree.ElementTree as ET
           from datetime import datetime
           from zoneinfo import ZoneInfo
+          from urllib.parse import quote
 
           JST = ZoneInfo("Asia/Tokyo")
           now = datetime.now(JST)
 
           stocks = [
-              ("日経平均", "%5EN225"),
-              ("TOPIX", "%5ETOPX"),
-              ("NYダウ", "%5EDJI"),
-              ("S&P500", "%5EGSPC"),
-              ("NASDAQ", "%5EIXIC"),
+              ("日経平均", "^N225"),
+              ("TOPIX連動ETF（1306）", "1306.T"),
+              ("NYダウ", "^DJI"),
+              ("S&P500", "^GSPC"),
+              ("NASDAQ", "^IXIC"),
               ("ドル円", "JPY=X"),
           ]
 
           rows = []
+
           for name, ticker in stocks:
               try:
                   url = (
                       "https://query1.finance.yahoo.com/v8/finance/chart/"
-                      + ticker + "?range=5d&interval=1d"
+                      + quote(ticker)
+                      + "?range=5d&interval=1d"
                   )
-                  response = requests.get(
+
+                  req = urllib.request.Request(
                       url,
-                      headers={"User-Agent": "Mozilla/5.0"},
-                      timeout=20
+                      headers={"User-Agent": "Mozilla/5.0"}
                   )
-                  response.raise_for_status()
-                  result = response.json()["chart"]["result"][0]
+
+                  with urllib.request.urlopen(req, timeout=20) as response:
+                      data = json.loads(response.read())
+
+                  result = data["chart"]["result"][0]
                   closes = [
                       x for x in result["indicators"]["quote"][0]["close"]
                       if x is not None
                   ]
+
                   latest = closes[-1]
                   previous = closes[-2]
                   change = (latest / previous - 1) * 100
+
                   rows.append(
                       f"| {name} | {latest:,.2f} | {change:+.2f}% |"
                   )
+
+                  print(f"取得成功: {name}")
+
               except Exception as e:
                   print(f"取得エラー {name}: {e}")
 
@@ -69,42 +81,44 @@ jobs:
 
           title = f"日本株・マーケットレポート {now:%Y年%m月%d日}"
 
-          body = f"""# 日本株・マーケットレポート
-
-          **更新日時：{now:%Y年%m月%d日 %H:%M}（日本時間）**
-
-          ## 主要市場データ
-
-          | 市場・指標 | 終値・価格 | 前日比 |
-          |---|---:|---:|
-          {chr(10).join(rows)}
-
-          ## 本日の市場チェック
-
-          ### 国内市場
-          日経平均とTOPIXの動向を確認し、国内株式市場の方向性を整理します。
-
-          ### 米国市場
-          米国主要指数の動向から、日本市場への影響を確認します。
-
-          ### 為替市場
-          ドル円の変動を確認し、輸出関連株や輸入関連株への影響を整理します。
-
-          ## 本日の注目ポイント
-
-          - 日経平均とTOPIXの方向性
-          - 米国株式市場の動向
-          - ドル円の変動
-          - 国内外の重要経済イベント
-
-          ## まとめ
-
-          各市場の価格動向を確認し、当日の投資環境を整理します。
-
-          ---
-          ※市場データはYahoo Financeから取得しています。
-          ※本レポートは情報提供を目的としています。
-          """
+          body = "\n".join([
+              "# 日本株・マーケットレポート",
+              "",
+              f"**更新日時：{now:%Y年%m月%d日 %H:%M}（日本時間）**",
+              "",
+              "## 主要市場データ",
+              "",
+              "| 市場・指標 | 終値・価格 | 前日比 |",
+              "|---|---:|---:|",
+              *rows,
+              "",
+              "## 本日の市場チェック",
+              "",
+              "### 国内市場",
+              "日経平均とTOPIX連動ETFの動向を確認します。",
+              "",
+              "### 米国市場",
+              "NYダウ、S&P500、NASDAQの動向を確認します。",
+              "",
+              "### 為替市場",
+              "ドル円の変動と輸出関連株への影響を確認します。",
+              "",
+              "## 本日の注目ポイント",
+              "",
+              "- 国内株式市場の方向性",
+              "- 米国株式市場の動向",
+              "- ドル円の変動",
+              "- 国内外の重要経済イベント",
+              "",
+              "## まとめ",
+              "",
+              "各市場の価格動向をもとに、当日の投資環境を整理します。",
+              "",
+              "---",
+              "※市場データはYahoo Financeから取得しています。",
+              "※1306はTOPIX連動ETFの価格です。",
+              "※本レポートは情報提供を目的としています。"
+          ])
 
           ATOM = "http://www.w3.org/2005/Atom"
           APP = "http://www.w3.org/2007/app"
@@ -113,43 +127,69 @@ jobs:
           ET.register_namespace("app", APP)
 
           entry = ET.Element(f"{{{ATOM}}}entry")
-          ET.SubElement(entry, f"{{{ATOM}}}title").text = title
+
+          ET.SubElement(
+              entry, f"{{{ATOM}}}title"
+          ).text = title
 
           author = ET.SubElement(entry, f"{{{ATOM}}}author")
-          ET.SubElement(author, f"{{{ATOM}}}name").text = "Pisao"
+          ET.SubElement(
+              author, f"{{{ATOM}}}name"
+          ).text = "Pisao"
 
           content = ET.SubElement(
-              entry, f"{{{ATOM}}}content",
-              {"type": "text/x-markdown"}
+              entry,
+              f"{{{ATOM}}}content",
+              {"type": "text/plain"}
           )
           content.text = body
 
           control = ET.SubElement(entry, f"{{{APP}}}control")
-          ET.SubElement(control, f"{{{APP}}}draft").text = "yes"
+          ET.SubElement(
+              control, f"{{{APP}}}draft"
+          ).text = "yes"
 
           xml = ET.tostring(
-              entry, encoding="utf-8", xml_declaration=True
+              entry,
+              encoding="utf-8",
+              xml_declaration=True
           )
 
+          api_key = os.environ["OWNER_API_KEY"]
           domain = os.environ["BLOG_DOMAIN"]
-          api_key = os.environ["HATENA_API_KEY"]
+
+          if not api_key or not domain:
+              raise RuntimeError("GitHub Secretsの設定を確認してください")
+
+          api_key.encode("ascii")
+
+          credentials = base64.b64encode(
+              f"Pisao:{api_key}".encode("ascii")
+          ).decode("ascii")
 
           endpoint = (
-              f"https://blog.hatena.ne.jp/Pisao/{domain}/atom/entry"
+              f"https://blog.hatena.ne.jp/Pisao/"
+              f"{domain}/atom/entry"
           )
 
-          result = requests.post(
+          request = urllib.request.Request(
               endpoint,
               data=xml,
-              auth=("Pisao", api_key),
+              method="POST",
               headers={
+                  "Authorization": f"Basic {credentials}",
                   "Content-Type": "application/atom+xml; charset=utf-8"
-              },
-              timeout=30
+              }
           )
 
-          print("Hatena response:", result.status_code)
-          print(result.text[:2000])
-          result.raise_for_status()
+          try:
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  print("Hatena response:", response.status)
+                  print(response.read().decode("utf-8")[:2000])
+          except urllib.error.HTTPError as e:
+              print("投稿エラー:", e.code)
+              print(e.read().decode("utf-8", errors="replace")[:2000])
+              raise
+
           print("下書き投稿に成功しました:", title)
           PY
