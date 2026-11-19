@@ -1,27 +1,155 @@
 
-name: Daily Hatena Draft
+name: Daily Hatena Market Report
 
 on:
   schedule:
     - cron: '30 22 * * 0-4'
   workflow_dispatch:
 
-permissions:
-  contents: write
-
 jobs:
-  create-draft:
+  publish-draft:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Install Python packages
+        run: pip install requests
 
-      - name: Create daily draft
+      - name: Generate and post market report
         env:
           HATENA_API_KEY: ${{ secrets.OWNER_API_KEY }}
-          BLOG_DOMAIN: pisao.hatenablog.com
-          BLOG_OWNER: Pisao
+          BLOG_DOMAIN: ${{ secrets.BLOG_DOMAIN }}
         run: |
-          echo "Hatena draft workflow is ready."
-          echo "Blog: ${BLOG_OWNER}/${BLOG_DOMAIN}"
-          echo "API key configured: $([ -n "$HATENA_API_KEY" ] && echo yes || echo no)"
+          python - <<'PY'
+          import os
+          import requests
+          import xml.etree.ElementTree as ET
+          from datetime import datetime
+          from zoneinfo import ZoneInfo
+
+          JST = ZoneInfo("Asia/Tokyo")
+          now = datetime.now(JST)
+
+          stocks = [
+              ("日経平均", "%5EN225"),
+              ("TOPIX", "%5ETOPX"),
+              ("NYダウ", "%5EDJI"),
+              ("S&P500", "%5EGSPC"),
+              ("NASDAQ", "%5EIXIC"),
+              ("ドル円", "JPY=X"),
+          ]
+
+          rows = []
+          for name, ticker in stocks:
+              try:
+                  url = (
+                      "https://query1.finance.yahoo.com/v8/finance/chart/"
+                      + ticker + "?range=5d&interval=1d"
+                  )
+                  response = requests.get(
+                      url,
+                      headers={"User-Agent": "Mozilla/5.0"},
+                      timeout=20
+                  )
+                  response.raise_for_status()
+                  result = response.json()["chart"]["result"][0]
+                  closes = [
+                      x for x in result["indicators"]["quote"][0]["close"]
+                      if x is not None
+                  ]
+                  latest = closes[-1]
+                  previous = closes[-2]
+                  change = (latest / previous - 1) * 100
+                  rows.append(
+                      f"| {name} | {latest:,.2f} | {change:+.2f}% |"
+                  )
+              except Exception as e:
+                  print(f"取得エラー {name}: {e}")
+
+          if not rows:
+              raise RuntimeError("市場データを取得できませんでした")
+
+          title = f"日本株・マーケットレポート {now:%Y年%m月%d日}"
+
+          body = f"""# 日本株・マーケットレポート
+
+          **更新日時：{now:%Y年%m月%d日 %H:%M}（日本時間）**
+
+          ## 主要市場データ
+
+          | 市場・指標 | 終値・価格 | 前日比 |
+          |---|---:|---:|
+          {chr(10).join(rows)}
+
+          ## 本日の市場チェック
+
+          ### 国内市場
+          日経平均とTOPIXの動向を確認し、国内株式市場の方向性を整理します。
+
+          ### 米国市場
+          米国主要指数の動向から、日本市場への影響を確認します。
+
+          ### 為替市場
+          ドル円の変動を確認し、輸出関連株や輸入関連株への影響を整理します。
+
+          ## 本日の注目ポイント
+
+          - 日経平均とTOPIXの方向性
+          - 米国株式市場の動向
+          - ドル円の変動
+          - 国内外の重要経済イベント
+
+          ## まとめ
+
+          各市場の価格動向を確認し、当日の投資環境を整理します。
+
+          ---
+          ※市場データはYahoo Financeから取得しています。
+          ※本レポートは情報提供を目的としています。
+          """
+
+          ATOM = "http://www.w3.org/2005/Atom"
+          APP = "http://www.w3.org/2007/app"
+
+          ET.register_namespace("", ATOM)
+          ET.register_namespace("app", APP)
+
+          entry = ET.Element(f"{{{ATOM}}}entry")
+          ET.SubElement(entry, f"{{{ATOM}}}title").text = title
+
+          author = ET.SubElement(entry, f"{{{ATOM}}}author")
+          ET.SubElement(author, f"{{{ATOM}}}name").text = "Pisao"
+
+          content = ET.SubElement(
+              entry, f"{{{ATOM}}}content",
+              {"type": "text/x-markdown"}
+          )
+          content.text = body
+
+          control = ET.SubElement(entry, f"{{{APP}}}control")
+          ET.SubElement(control, f"{{{APP}}}draft").text = "yes"
+
+          xml = ET.tostring(
+              entry, encoding="utf-8", xml_declaration=True
+          )
+
+          domain = os.environ["BLOG_DOMAIN"]
+          api_key = os.environ["HATENA_API_KEY"]
+
+          endpoint = (
+              f"https://blog.hatena.ne.jp/Pisao/{domain}/atom/entry"
+          )
+
+          result = requests.post(
+              endpoint,
+              data=xml,
+              auth=("Pisao", api_key),
+              headers={
+                  "Content-Type": "application/atom+xml; charset=utf-8"
+              },
+              timeout=30
+          )
+
+          print("Hatena response:", result.status_code)
+          print(result.text[:2000])
+          result.raise_for_status()
+          print("下書き投稿に成功しました:", title)
+          PY
