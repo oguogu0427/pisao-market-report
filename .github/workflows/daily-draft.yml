@@ -8,19 +8,22 @@ permissions:
   contents: read
 
 jobs:
-  save-draft:
+  save-hatena-draft:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Check report HTML
+      - name: Verify report
         run: |
-          test -s reports/latest-report.html
+          if [ ! -s reports/latest-report.html ]; then
+            echo "Report HTML is missing or empty."
+            exit 1
+          fi
           echo "Report HTML found."
 
-      - name: Save draft to Hatena
+      - name: Save Hatena draft
         env:
           OWNER_API_KEY: ${{ secrets.OWNER_API_KEY }}
           BLOG_DOMAIN: ${{ secrets.BLOG_DOMAIN }}
@@ -28,63 +31,84 @@ jobs:
           python3 <<'PY'
           import os
           import sys
+          import base64
           import html.parser
           import urllib.request
           import urllib.error
           import xml.etree.ElementTree as ET
 
-          report_path = "reports/latest-report.html"
-
-          with open(report_path, "r", encoding="utf-8") as f:
-              report_html = f.read()
-
           class TitleParser(html.parser.HTMLParser):
               def __init__(self):
                   super().__init__()
-                  self.in_title = False
+                  self.inside = False
                   self.title = ""
 
               def handle_starttag(self, tag, attrs):
                   if tag.lower() == "title":
-                      self.in_title = True
+                      self.inside = True
 
               def handle_endtag(self, tag):
                   if tag.lower() == "title":
-                      self.in_title = False
+                      self.inside = False
 
               def handle_data(self, data):
-                  if self.in_title:
+                  if self.inside:
                       self.title += data
+
+          with open(
+              "reports/latest-report.html",
+              "r",
+              encoding="utf-8"
+          ) as f:
+              report_html = f.read()
 
           parser = TitleParser()
           parser.feed(report_html)
 
-          title = parser.title.strip() or "日本株 朝の相場レポート"
+          title = parser.title.strip()
+          if not title:
+              title = "日本株 朝の相場レポート"
 
-          ATOM = "http://www.w3.org/2005/Atom"
-          APP = "http://www.w3.org/2007/app"
+          domain = os.environ["BLOG_DOMAIN"]
+          api_key = os.environ["OWNER_API_KEY"]
 
-          ET.register_namespace("", ATOM)
-          ET.register_namespace("app", APP)
+          if not domain or not api_key:
+              raise RuntimeError("Hatena credentials are missing.")
 
-          entry = ET.Element(f"{{{ATOM}}}entry")
+          atom = "http://www.w3.org/2005/Atom"
+          app = "http://www.w3.org/2007/app"
 
-          title_element = ET.SubElement(entry, f"{{{ATOM}}}title")
-          title_element.text = title
+          ET.register_namespace("", atom)
+          ET.register_namespace("app", app)
 
-          author = ET.SubElement(entry, f"{{{ATOM}}}author")
-          name = ET.SubElement(author, f"{{{ATOM}}}name")
-          name.text = "Pisao"
+          entry = ET.Element(f"{{{atom}}}entry")
+
+          title_node = ET.SubElement(
+              entry, f"{{{atom}}}title"
+          )
+          title_node.text = title
+
+          author = ET.SubElement(
+              entry, f"{{{atom}}}author"
+          )
+          author_name = ET.SubElement(
+              author, f"{{{atom}}}name"
+          )
+          author_name.text = "Pisao"
 
           content = ET.SubElement(
               entry,
-              f"{{{ATOM}}}content",
+              f"{{{atom}}}content",
               {"type": "text/html"}
           )
           content.text = report_html
 
-          control = ET.SubElement(entry, f"{{{APP}}}control")
-          draft = ET.SubElement(control, f"{{{APP}}}draft")
+          control = ET.SubElement(
+              entry, f"{{{app}}}control"
+          )
+          draft = ET.SubElement(
+              control, f"{{{app}}}draft"
+          )
           draft.text = "yes"
 
           xml_data = ET.tostring(
@@ -93,32 +117,42 @@ jobs:
               xml_declaration=True
           )
 
-          domain = os.environ["BLOG_DOMAIN"]
-          api_key = os.environ["OWNER_API_KEY"]
+          endpoint = (
+              f"https://blog.hatena.ne.jp/Pisao/"
+              f"{domain}/atom/entry"
+          )
 
-          url = f"https://blog.hatena.ne.jp/Pisao/{domain}/atom/entry"
-
-          import base64
-          auth = base64.b64encode(
-              f"Pisao:{api_key}".encode()
-          ).decode()
+          credentials = base64.b64encode(
+              f"Pisao:{api_key}".encode("utf-8")
+          ).decode("ascii")
 
           request = urllib.request.Request(
-              url,
+              endpoint,
               data=xml_data,
               headers={
-                  "Authorization": f"Basic {auth}",
+                  "Authorization": f"Basic {credentials}",
                   "Content-Type": "application/atom+xml; charset=utf-8"
               },
               method="POST"
           )
 
           try:
-              with urllib.request.urlopen(request, timeout=60) as response:
-                  print("Hatena draft saved successfully.")
-                  print("HTTP status:", response.status)
-          except urllib.error.HTTPError as e:
-              print("Hatena API error:", e.code)
-              print(e.read().decode("utf-8", errors="replace"))
+              with urllib.request.urlopen(
+                  request, timeout=60
+              ) as response:
+                  print("Hatena draft saved.")
+                  print("HTTP:", response.status)
+
+          except urllib.error.HTTPError as error:
+              print("Hatena API error:", error.code)
+              print(
+                  error.read().decode(
+                      "utf-8", errors="replace"
+                  )
+              )
+              sys.exit(1)
+
+          except Exception as error:
+              print("Request failed:", str(error))
               sys.exit(1)
           PY
