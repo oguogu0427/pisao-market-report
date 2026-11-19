@@ -1,9 +1,14 @@
+
 name: Japanese Stock Market Report
 
 on:
+  repository_dispatch:
+    types:
+      - stock-report-ready
+
   workflow_dispatch:
+
   schedule:
-    # 平日 07:30（日本時間）
     - cron: '30 22 * * 0-4'
 
 permissions:
@@ -21,41 +26,70 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Check report.html
+      - name: Check report availability
+        id: report
         run: |
-          if [ ! -s report.html ]; then
-            echo "report.html が見つかりません。"
-            exit 1
+          if [ -s report.html ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            echo "Report HTML found."
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "Report HTML is not available. Skipping this run."
           fi
 
-      - name: Create Hatena AtomPub entry
+      - name: Create Hatena AtomPub XML
+        if: steps.report.outputs.available == 'true'
         env:
-          TZ: Asia/Tokyo
+          HATENA_USER: Pisao
         run: |
           set -euo pipefail
 
-          TITLE="日本株 朝の相場レポート $(date +'%Y年%m月%d日')"
+          python3 - <<'PY'
+          import os
+          import xml.etree.ElementTree as ET
+          from datetime import datetime
+          from zoneinfo import ZoneInfo
 
-          {
-            printf '%s\n' \
-              '<?xml version="1.0" encoding="utf-8"?>' \
-              '<entry xmlns="http://www.w3.org/2005/Atom" xmlns:app="http://www.w3.org/2007/app">'
+          atom = "http://www.w3.org/2005/Atom"
+          app = "http://www.w3.org/2007/app"
 
-            printf '  <title>%s</title>\n' "$TITLE"
+          ET.register_namespace("", atom)
+          ET.register_namespace("app", app)
 
-            printf '%s\n' \
-              '  <author><name>ChatGPT</name></author>' \
-              '  <content type="text/html"><![CDATA['
+          def q(ns, name):
+              return f"{{{ns}}}{name}"
 
-            cat report.html
+          with open("report.html", encoding="utf-8") as f:
+              report = f.read()
 
-            printf '%s\n' \
-              ']]></content>' \
-              '  <app:control><app:draft>yes</app:draft></app:control>' \
-              '</entry>'
-          } > hatena-entry.xml
+          if not report.strip():
+              raise RuntimeError("HTML report is empty")
+
+          date = datetime.now(ZoneInfo("Asia/Tokyo"))
+          title = "日本株 朝の相場レポート " + date.strftime("%Y年%m月%d日")
+
+          entry = ET.Element(q(atom, "entry"))
+          ET.SubElement(entry, q(atom, "title")).text = title
+
+          author = ET.SubElement(entry, q(atom, "author"))
+          ET.SubElement(author, q(atom, "name")).text = os.environ["HATENA_USER"]
+
+          content = ET.SubElement(entry, q(atom, "content"))
+          content.set("type", "html")
+          content.text = report
+
+          control = ET.SubElement(entry, q(app, "control"))
+          ET.SubElement(control, q(app, "draft")).text = "yes"
+
+          ET.ElementTree(entry).write(
+              "hatena-entry.xml",
+              encoding="utf-8",
+              xml_declaration=True
+          )
+          PY
 
       - name: Save HTML draft to Hatena
+        if: steps.report.outputs.available == 'true'
         env:
           HATENA_USER: Pisao
           HATENA_API_KEY: ${{ secrets.OWNER_API_KEY }}
@@ -63,10 +97,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [ -z "$HATENA_API_KEY" ] || [ -z "$BLOG_DOMAIN" ]; then
-            echo "Hatena接続用Secretsを確認してください。"
-            exit 1
-          fi
+          test -n "$HATENA_API_KEY"
+          test -n "$BLOG_DOMAIN"
 
           curl --fail-with-body --silent --show-error \
             --user "${HATENA_USER}:${HATENA_API_KEY}" \
