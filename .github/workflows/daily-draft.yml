@@ -26,19 +26,42 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Check report availability
-        id: report
+      - name: Prepare report HTML
+        env:
+          EVENT_PATH: ${{ github.event_path }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
-          if [ -s report.html ]; then
-            echo "available=true" >> "$GITHUB_OUTPUT"
-            echo "Report HTML found."
-          else
-            echo "available=false" >> "$GITHUB_OUTPUT"
-            echo "Report HTML is not available. Skipping this run."
-          fi
+          set -euo pipefail
 
-      - name: Create Hatena AtomPub XML
-        if: steps.report.outputs.available == 'true'
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+
+          event_name = os.environ["EVENT_NAME"]
+
+          if event_name == "repository_dispatch":
+              with open(os.environ["EVENT_PATH"], encoding="utf-8") as f:
+                  event = json.load(f)
+
+              report = event.get("client_payload", {}).get("report_html", "")
+
+              if not isinstance(report, str) or not report.strip():
+                  raise RuntimeError("ChatGPTから受信したHTML本文が空です")
+
+              pathlib.Path("report.html").write_text(
+                  report, encoding="utf-8"
+              )
+          else:
+              report_path = pathlib.Path("report.html")
+
+              if not report_path.is_file() or not report_path.stat().st_size:
+                  raise RuntimeError("投稿対象のレポート本文がありません")
+
+          print("HTML report prepared successfully")
+          PY
+
+      - name: Create Hatena AtomPub entry
         env:
           HATENA_USER: Pisao
         run: |
@@ -63,10 +86,10 @@ jobs:
               report = f.read()
 
           if not report.strip():
-              raise RuntimeError("HTML report is empty")
+              raise RuntimeError("HTML本文が空です")
 
-          date = datetime.now(ZoneInfo("Asia/Tokyo"))
-          title = "日本株 朝の相場レポート " + date.strftime("%Y年%m月%d日")
+          now = datetime.now(ZoneInfo("Asia/Tokyo"))
+          title = "日本株 朝の相場レポート " + now.strftime("%Y年%m月%d日")
 
           entry = ET.Element(q(atom, "entry"))
           ET.SubElement(entry, q(atom, "title")).text = title
@@ -89,7 +112,6 @@ jobs:
           PY
 
       - name: Save HTML draft to Hatena
-        if: steps.report.outputs.available == 'true'
         env:
           HATENA_USER: Pisao
           HATENA_API_KEY: ${{ secrets.OWNER_API_KEY }}
@@ -100,9 +122,12 @@ jobs:
           test -n "$HATENA_API_KEY"
           test -n "$BLOG_DOMAIN"
 
-          curl --fail-with-body --silent --show-error \
+          RESPONSE=$(curl --fail-with-body --silent --show-error \
             --user "${HATENA_USER}:${HATENA_API_KEY}" \
             --request POST \
             --header "Content-Type: application/atom+xml; charset=utf-8" \
             --data-binary @hatena-entry.xml \
-            "https://blog.hatena.ne.jp/${HATENA_USER}/${BLOG_DOMAIN}/atom/entry"
+            "https://blog.hatena.ne.jp/${HATENA_USER}/${BLOG_DOMAIN}/atom/entry")
+
+          echo "$RESPONSE"
+          echo "Hatena draft submission completed."
