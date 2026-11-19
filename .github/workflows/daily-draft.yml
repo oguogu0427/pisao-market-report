@@ -43,18 +43,17 @@ jobs:
           rows = []
 
           for name, ticker in stocks:
+              url = (
+                  "https://query1.finance.yahoo.com/v8/finance/chart/"
+                  + quote(ticker)
+                  + "?range=5d&interval=1d"
+              )
+              req = urllib.request.Request(
+                  url,
+                  headers={"User-Agent": "Mozilla/5.0"}
+              )
+
               try:
-                  url = (
-                      "https://query1.finance.yahoo.com/v8/finance/chart/"
-                      + quote(ticker)
-                      + "?range=5d&interval=1d"
-                  )
-
-                  req = urllib.request.Request(
-                      url,
-                      headers={"User-Agent": "Mozilla/5.0"}
-                  )
-
                   with urllib.request.urlopen(req, timeout=20) as response:
                       data = json.loads(response.read())
 
@@ -65,7 +64,7 @@ jobs:
                   ]
 
                   if len(closes) < 2:
-                      raise RuntimeError("価格データが不足しています")
+                      raise RuntimeError("価格データ不足")
 
                   latest = closes[-1]
                   previous = closes[-2]
@@ -77,38 +76,25 @@ jobs:
                       "change": f"{change:+.2f}%",
                       "positive": change >= 0
                   })
-
                   print(f"取得成功: {name}")
 
               except Exception as e:
-                  print(f"取得エラー {name}: {e}")
-
-          if not rows:
-              raise RuntimeError("市場データを取得できませんでした")
+                  raise RuntimeError(f"{name}の取得に失敗: {e}")
 
           title = f"日本株・マーケットレポート {now:%Y年%m月%d日}"
 
           table_rows = []
-
           for i, item in enumerate(rows):
               bg = "#f1f5f9" if i % 2 == 0 else "#ffffff"
               color = "#d32f2f" if item["positive"] else "#1976d2"
 
-              table_rows.append(
-                  f"""
-                  <tr style="background:{bg};">
-                    <td style="padding:13px;border-bottom:1px solid #e2e8f0;">
-                      {escape(item['name'])}
-                    </td>
-                    <td style="padding:13px;text-align:right;border-bottom:1px solid #e2e8f0;">
-                      {escape(item['price'])}
-                    </td>
-                    <td style="padding:13px;text-align:right;border-bottom:1px solid #e2e8f0;color:{color};font-weight:bold;">
-                      {escape(item['change'])}
-                    </td>
-                  </tr>
-                  """
-              )
+              table_rows.append(f"""
+              <tr style="background:{bg};">
+                <td style="padding:13px;border-bottom:1px solid #e2e8f0;">{escape(item['name'])}</td>
+                <td style="padding:13px;text-align:right;border-bottom:1px solid #e2e8f0;">{escape(item['price'])}</td>
+                <td style="padding:13px;text-align:right;border-bottom:1px solid #e2e8f0;color:{color};font-weight:bold;">{escape(item['change'])}</td>
+              </tr>
+              """)
 
           table_html = "\n".join(table_rows)
 
@@ -118,14 +104,10 @@ jobs:
             <div style="background:#142d4e;color:#ffffff;padding:28px 22px;border-radius:8px;margin-bottom:22px;">
               <div style="font-size:13px;letter-spacing:2px;color:#cbd5e1;">MARKET REPORT</div>
               <h1 style="font-size:25px;margin:8px 0;color:#ffffff;">日本株・マーケットレポート</h1>
-              <p style="font-size:14px;margin:0;color:#e2e8f0;">
-                {now:%Y年%m月%d日 %H:%M} 更新（日本時間）
-              </p>
+              <p style="font-size:14px;margin:0;color:#e2e8f0;">{now:%Y年%m月%d日 %H:%M} 更新（日本時間）</p>
             </div>
 
-            <h2 style="font-size:20px;color:#142d4e;border-left:5px solid #d5a84b;padding:8px 12px;">
-              主要市場データ
-            </h2>
+            <h2 style="font-size:20px;color:#142d4e;border-left:5px solid #d5a84b;padding:8px 12px;">主要市場データ</h2>
 
             <div style="overflow-x:auto;margin:18px 0;">
               <table style="width:100%;border-collapse:collapse;font-size:14px;">
@@ -136,15 +118,11 @@ jobs:
                     <th style="padding:14px;text-align:right;">前日比</th>
                   </tr>
                 </thead>
-                <tbody>
-                  {table_html}
-                </tbody>
+                <tbody>{table_html}</tbody>
               </table>
             </div>
 
-            <h2 style="font-size:20px;color:#142d4e;border-left:5px solid #d5a84b;padding:8px 12px;margin-top:30px;">
-              本日の市場チェック
-            </h2>
+            <h2 style="font-size:20px;color:#142d4e;border-left:5px solid #d5a84b;padding:8px 12px;">本日の市場チェック</h2>
 
             <h3 style="color:#142d4e;">国内市場</h3>
             <p>日経平均とTOPIX連動ETFの価格動向を確認します。国内株式市場の方向性や主要銘柄への影響を整理します。</p>
@@ -155,10 +133,7 @@ jobs:
             <h3 style="color:#142d4e;">為替市場</h3>
             <p>ドル円の変動を確認し、輸出関連企業や国内株式市場への影響を整理します。</p>
 
-            <h2 style="font-size:20px;color:#142d4e;border-left:5px solid #d5a84b;padding:8px 12px;margin-top:30px;">
-              本日の注目ポイント
-            </h2>
-
+            <h2 style="font-size:20px;color:#142d4e;border-left:5px solid #d5a84b;padding:8px 12px;">本日の注目ポイント</h2>
             <ul style="padding-left:22px;">
               <li>国内株式市場の方向性</li>
               <li>米国株式市場の動向</li>
@@ -166,10 +141,7 @@ jobs:
               <li>国内外の重要経済イベント</li>
             </ul>
 
-            <h2 style="font-size:20px;color:#142d4e;border-left:5px solid #d5a84b;padding:8px 12px;margin-top:30px;">
-              まとめ
-            </h2>
-
+            <h2 style="font-size:20px;color:#142d4e;border-left:5px solid #d5a84b;padding:8px 12px;">まとめ</h2>
             <p>主要市場の価格動向をもとに、国内外の投資環境を整理しました。各指標の変化を確認しながら、今後の市場動向を注視します。</p>
 
             <div style="margin-top:35px;padding:16px;background:#f1f5f9;border-radius:6px;font-size:12px;color:#64748b;">
@@ -178,7 +150,6 @@ jobs:
               ※前日比は取得した直近2営業日の終値を比較しています。<br>
               ※本レポートは情報提供を目的としています。
             </div>
-
           </div>
           """
 
@@ -189,15 +160,10 @@ jobs:
           ET.register_namespace("app", APP)
 
           entry = ET.Element(f"{{{ATOM}}}entry")
-
-          ET.SubElement(
-              entry, f"{{{ATOM}}}title"
-          ).text = title
+          ET.SubElement(entry, f"{{{ATOM}}}title").text = title
 
           author = ET.SubElement(entry, f"{{{ATOM}}}author")
-          ET.SubElement(
-              author, f"{{{ATOM}}}name"
-          ).text = "Pisao"
+          ET.SubElement(author, f"{{{ATOM}}}name").text = "Pisao"
 
           content = ET.SubElement(
               entry,
@@ -207,9 +173,7 @@ jobs:
           content.text = body
 
           control = ET.SubElement(entry, f"{{{APP}}}control")
-          ET.SubElement(
-              control, f"{{{APP}}}draft"
-          ).text = "yes"
+          ET.SubElement(control, f"{{{APP}}}draft").text = "yes"
 
           xml = ET.tostring(
               entry,
