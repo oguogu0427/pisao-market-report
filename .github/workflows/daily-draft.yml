@@ -1,35 +1,124 @@
-name: Receive Japanese Market Report
+
+name: Hatena Blog Draft
 
 on:
-  repository_dispatch:
-    types: [hatena-draft]
-
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
-  receive-report:
+  save-draft:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Save report HTML
+      - name: Check report HTML
+        run: |
+          test -s reports/latest-report.html
+          echo "Report HTML found."
+
+      - name: Save draft to Hatena
         env:
-          REPORT_HTML: ${{ github.event.client_payload.html }}
+          OWNER_API_KEY: ${{ secrets.OWNER_API_KEY }}
+          BLOG_DOMAIN: ${{ secrets.BLOG_DOMAIN }}
         run: |
-          if [ -z "$REPORT_HTML" ]; then
-            echo "HTML report is empty"
-            exit 1
-          fi
+          python3 <<'PY'
+          import os
+          import sys
+          import html.parser
+          import urllib.request
+          import urllib.error
+          import xml.etree.ElementTree as ET
 
-          mkdir -p reports
-          printf '%s' "$REPORT_HTML" > reports/latest-report.html
+          report_path = "reports/latest-report.html"
 
-      - name: Commit report
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add reports/latest-report.html
-          git commit -m "Update morning market report" || echo "No changes"
-          git push
+          with open(report_path, "r", encoding="utf-8") as f:
+              report_html = f.read()
+
+          class TitleParser(html.parser.HTMLParser):
+              def __init__(self):
+                  super().__init__()
+                  self.in_title = False
+                  self.title = ""
+
+              def handle_starttag(self, tag, attrs):
+                  if tag.lower() == "title":
+                      self.in_title = True
+
+              def handle_endtag(self, tag):
+                  if tag.lower() == "title":
+                      self.in_title = False
+
+              def handle_data(self, data):
+                  if self.in_title:
+                      self.title += data
+
+          parser = TitleParser()
+          parser.feed(report_html)
+
+          title = parser.title.strip() or "日本株 朝の相場レポート"
+
+          ATOM = "http://www.w3.org/2005/Atom"
+          APP = "http://www.w3.org/2007/app"
+
+          ET.register_namespace("", ATOM)
+          ET.register_namespace("app", APP)
+
+          entry = ET.Element(f"{{{ATOM}}}entry")
+
+          title_element = ET.SubElement(entry, f"{{{ATOM}}}title")
+          title_element.text = title
+
+          author = ET.SubElement(entry, f"{{{ATOM}}}author")
+          name = ET.SubElement(author, f"{{{ATOM}}}name")
+          name.text = "Pisao"
+
+          content = ET.SubElement(
+              entry,
+              f"{{{ATOM}}}content",
+              {"type": "text/html"}
+          )
+          content.text = report_html
+
+          control = ET.SubElement(entry, f"{{{APP}}}control")
+          draft = ET.SubElement(control, f"{{{APP}}}draft")
+          draft.text = "yes"
+
+          xml_data = ET.tostring(
+              entry,
+              encoding="utf-8",
+              xml_declaration=True
+          )
+
+          domain = os.environ["BLOG_DOMAIN"]
+          api_key = os.environ["OWNER_API_KEY"]
+
+          url = f"https://blog.hatena.ne.jp/Pisao/{domain}/atom/entry"
+
+          import base64
+          auth = base64.b64encode(
+              f"Pisao:{api_key}".encode()
+          ).decode()
+
+          request = urllib.request.Request(
+              url,
+              data=xml_data,
+              headers={
+                  "Authorization": f"Basic {auth}",
+                  "Content-Type": "application/atom+xml; charset=utf-8"
+              },
+              method="POST"
+          )
+
+          try:
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  print("Hatena draft saved successfully.")
+                  print("HTTP status:", response.status)
+          except urllib.error.HTTPError as e:
+              print("Hatena API error:", e.code)
+              print(e.read().decode("utf-8", errors="replace"))
+              sys.exit(1)
+          PY
