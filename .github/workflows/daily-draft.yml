@@ -2,8 +2,8 @@
 name: Daily Hatena Market Report
 
 on:
-  schedule:
-    - cron: '30 22 * * 0-4'
+  repository_dispatch:
+    types: [market_report_ready]
   workflow_dispatch:
 
 permissions:
@@ -16,207 +16,62 @@ concurrency:
 jobs:
   create-report:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 5
 
     steps:
       - name: Install Python dependencies
         run: pip install requests
 
-      - name: Generate report and save Hatena draft
+      - name: Save ChatGPT report to Hatena draft
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OWNER_API_KEY: ${{ secrets.OWNER_API_KEY }}
           BLOG_DOMAIN: ${{ secrets.BLOG_DOMAIN }}
+          REPORT_HTML: ${{ github.event.client_payload.html }}
+          REPORT_TITLE: ${{ github.event.client_payload.title }}
         run: |
-          cat > create_report.py <<'PY'
+          python - <<'PY'
           import os
-          import json
-          import html
           import requests
           import xml.etree.ElementTree as ET
-          from datetime import datetime
-          from zoneinfo import ZoneInfo
 
-          JST = ZoneInfo("Asia/Tokyo")
-          now = datetime.now(JST)
-          date_text = now.strftime("%Y年%m月%d日（%A）")
-          date_text = date_text.replace(
-              "Monday", "月曜日"
-          ).replace(
-              "Tuesday", "火曜日"
-          ).replace(
-              "Wednesday", "水曜日"
-          ).replace(
-              "Thursday", "木曜日"
-          ).replace(
-              "Friday", "金曜日"
-          ).replace(
-              "Saturday", "土曜日"
-          ).replace(
-              "Sunday", "日曜日"
+          html = os.environ.get("REPORT_HTML", "").strip()
+          title = os.environ.get(
+              "REPORT_TITLE", "日本株朝刊レポート"
           )
 
-          # Yahoo Financeから最新の市場データを取得
-          symbols = {
-              "^N225": "日経平均",
-              "1306.T": "TOPIX連動ETF",
-              "^DJI": "NYダウ",
-              "^GSPC": "S&P500",
-              "^IXIC": "NASDAQ",
-              "JPY=X": "ドル円"
-          }
+          if not html:
+              raise RuntimeError("受信したHTMLが空です")
 
-          market_data = {}
+          if not os.environ.get("OWNER_API_KEY"):
+              raise RuntimeError("OWNER_API_KEYが未設定です")
 
-          for symbol, label in symbols.items():
-              url = (
-                  "https://query1.finance.yahoo.com/v8/finance/chart/"
-                  + requests.utils.quote(symbol, safe="")
-              )
-              try:
-                  response = requests.get(
-                      url,
-                      params={"range": "5d", "interval": "1d"},
-                      headers={"User-Agent": "Mozilla/5.0"},
-                      timeout=20
-                  )
-                  response.raise_for_status()
-                  result = response.json()["chart"]["result"][0]
-                  meta = result["meta"]
-                  closes = (
-                      result.get("indicators", {})
-                      .get("quote", [{}])[0]
-                      .get("close", [])
-                  )
-                  closes = [x for x in closes if x is not None]
-
-                  market_data[label] = {
-                      "symbol": symbol,
-                      "current": meta.get("regularMarketPrice"),
-                      "previous_close": meta.get("chartPreviousClose"),
-                      "recent_closes": closes[-5:]
-                  }
-              except Exception as e:
-                  market_data[label] = {
-                      "symbol": symbol,
-                      "取得状況": f"データ取得エラー: {str(e)}"
-                  }
-
-          prompt = f"""
-          あなたは日本株市場を専門とする金融アナリスト兼編集者です。
-          {date_text}の日本株朝刊レポートを作成してください。
-
-          【市場データ】
-          {json.dumps(market_data, ensure_ascii=False, indent=2)}
-
-          【調査指示】
-          Web検索を活用し、直近の日本市場、米国市場、為替、金利、
-          先物、経済指標、企業決算、政策、地政学関連ニュースを調査してください。
-          本日の日本市場に影響する材料を優先してください。
-          数値や発表時刻は情報源と日付を確認し、確認できた内容を記載してください。
-          取得できない数値は推測で埋めず、その旨を明記してください。
-          株価データとニュースの対象日を明確にしてください。
-
-          【必須フォーマット】
-          完成したHTML全文を出力してください。
-          Markdownやコードフェンス、前置き、解説は出力しないでください。
-
-          タイトル：
-          MARKET MORNING REPORT
-          日本株 朝の相場レポート
-          {date_text}
-
-          以下の8章をすべて作成してください。
-
-          1. 昨日の日本市場を振り返る
-             日経平均、TOPIX、業種別動向、売買の特徴。
-          2. 本日の日本市場の展望
-             想定レンジ、上昇・下落材料、寄り付きの注目点。
-          3. 海外市場・為替・先物の動向
-             米国株、ドル円、米金利、日経先物。
-          4. 本日の主要イベント
-             国内外の経済指標、要人発言、政策イベント。
-          5. 本日の決算発表情報
-             発表予定企業、注目点、業績を見るポイント。
-          6. 本日の相場で警戒したいポイント
-             金利、為替、需給、決算、海外情勢など。
-          7. 本日の注目銘柄10選
-             上昇注目5銘柄、下落警戒5銘柄。
-             各銘柄についてコード、注目理由、材料、リスクを記載。
-          8. 本日のまとめ
-             相場全体の見通し、重要価格帯、投資家の行動方針。
-
-          【品質・デザイン】
-          ・各章は具体的な情報と分析を含む十分な分量にする。
-          ・見出し、表、箇条書き、強調表示を活用する。
-          ・冒頭に要約と本日の重要ポイントを掲載する。
-          ・目次としてHatena記法の [:contents] を入れる。
-          ・スマートフォンでも読みやすいCSSを含める。
-          ・背景、見出し、表、注意事項を整えた読みやすいデザインにする。
-          ・銘柄コードと企業名を正確に記載する。
-          ・根拠のない株価予想や架空のニュースを作らない。
-          ・末尾に投資判断に関する免責事項を記載する。
-          ・HTMLはHatena Blogの記事本文として使える形式にする。
-          ・記事タイトルは「日本株朝刊レポート｜{date_text}」とする。
-          """
-
-          # OpenAI Responses APIでレポート生成
-          api_response = requests.post(
-              "https://api.openai.com/v1/responses",
-              headers={
-                  "Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}",
-                  "Content-Type": "application/json"
-              },
-              json={
-                  "model": "gpt-6.2-sol",
-                  "tools": [{"type": "web_search"}],
-                  "input": prompt
-              },
-              timeout=300
-          )
-          api_response.raise_for_status()
-          result = api_response.json()
-
-          parts = []
-          for item in result.get("output", []):
-              if item.get("type") == "message":
-                  for content in item.get("content", []):
-                      if content.get("type") == "output_text":
-                          parts.append(content.get("text", ""))
-
-          report_html = "\n".join(parts).strip()
-
-          if not report_html:
-              raise RuntimeError("レポート本文の生成結果が空です")
-
-          report_html = report_html.strip()
-          if report_html.startswith("```"):
-              report_html = report_html.split("\n", 1)[-1]
-              if report_html.endswith("```"):
-                  report_html = report_html[:-3].strip()
-
-          if "<" not in report_html or ">" not in report_html:
-              raise RuntimeError("生成結果がHTML形式ではありません")
-
-          # 生成したHTMLをそのままHatena記事本文へ格納
-          title = f"日本株朝刊レポート｜{date_text}"
+          if not os.environ.get("BLOG_DOMAIN"):
+              raise RuntimeError("BLOG_DOMAINが未設定です")
 
           atom = "http://www.w3.org/2005/Atom"
           app = "http://www.w3.org/2007/app"
+
           ET.register_namespace("", atom)
           ET.register_namespace("app", app)
 
           entry = ET.Element(f"{{{atom}}}entry")
-          ET.SubElement(entry, f"{{{atom}}}title").text = title
+          ET.SubElement(
+              entry, f"{{{atom}}}title"
+          ).text = title
+
           content = ET.SubElement(
               entry,
               f"{{{atom}}}content",
               {"type": "text/html"}
           )
-          content.text = report_html
+          content.text = html
 
-          control = ET.SubElement(entry, f"{{{app}}}control")
-          ET.SubElement(control, f"{{{app}}}draft").text = "yes"
+          control = ET.SubElement(
+              entry, f"{{{app}}}control"
+          )
+          ET.SubElement(
+              control, f"{{{app}}}draft"
+          ).text = "yes"
 
           xml_body = ET.tostring(
               entry,
@@ -224,32 +79,30 @@ jobs:
               xml_declaration=True
           )
 
-          blog_domain = os.environ["BLOG_DOMAIN"].strip().strip("/")
+          domain = os.environ["BLOG_DOMAIN"].strip().strip("/")
           endpoint = (
               f"https://blog.hatena.ne.jp/Pisao/"
-              f"{blog_domain}/atom/entry"
+              f"{domain}/atom/entry"
           )
 
-          post_response = requests.post(
+          response = requests.post(
               endpoint,
               data=xml_body,
               headers={
-                  "Content-Type": "application/atom+xml; charset=utf-8"
+                  "Content-Type":
+                  "application/atom+xml; charset=utf-8"
               },
-              auth=("Pisao", os.environ["OWNER_API_KEY"]),
+              auth=(
+                  "Pisao",
+                  os.environ["OWNER_API_KEY"]
+              ),
               timeout=60
           )
 
-          if post_response.status_code not in (200, 201):
-              raise RuntimeError(
-                  f"Hatena投稿エラー: {post_response.status_code} "
-                  f"{post_response.text[:1500]}"
-              )
+          response.raise_for_status()
 
           print("Hatena下書き保存成功")
-          print(f"記事タイトル: {title}")
-          print(f"HTML文字数: {len(report_html)}")
-          print(f"Hatena応答: {post_response.status_code}")
+          print("タイトル:", title)
+          print("HTML文字数:", len(html))
+          print("HTTP:", response.status_code)
           PY
-
-          python create_report.py
