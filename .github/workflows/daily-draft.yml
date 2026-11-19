@@ -26,6 +26,7 @@ jobs:
           from datetime import datetime
           from zoneinfo import ZoneInfo
           from urllib.parse import quote
+          from html import escape
 
           JST = ZoneInfo("Asia/Tokyo")
           now = datetime.now(JST)
@@ -63,13 +64,19 @@ jobs:
                       if x is not None
                   ]
 
+                  if len(closes) < 2:
+                      raise RuntimeError("価格データが不足しています")
+
                   latest = closes[-1]
                   previous = closes[-2]
                   change = (latest / previous - 1) * 100
 
-                  rows.append(
-                      f"| {name} | {latest:,.2f} | {change:+.2f}% |"
-                  )
+                  rows.append({
+                      "name": name,
+                      "price": f"{latest:,.2f}",
+                      "change": f"{change:+.2f}%",
+                      "positive": change >= 0
+                  })
 
                   print(f"取得成功: {name}")
 
@@ -81,44 +88,99 @@ jobs:
 
           title = f"日本株・マーケットレポート {now:%Y年%m月%d日}"
 
-          body = "\n".join([
-              "# 日本株・マーケットレポート",
-              "",
-              f"**更新日時：{now:%Y年%m月%d日 %H:%M}（日本時間）**",
-              "",
-              "## 主要市場データ",
-              "",
-              "| 市場・指標 | 終値・価格 | 前日比 |",
-              "|---|---:|---:|",
-              *rows,
-              "",
-              "## 本日の市場チェック",
-              "",
-              "### 国内市場",
-              "日経平均とTOPIX連動ETFの動向を確認します。",
-              "",
-              "### 米国市場",
-              "NYダウ、S&P500、NASDAQの動向を確認します。",
-              "",
-              "### 為替市場",
-              "ドル円の変動と輸出関連株への影響を確認します。",
-              "",
-              "## 本日の注目ポイント",
-              "",
-              "- 国内株式市場の方向性",
-              "- 米国株式市場の動向",
-              "- ドル円の変動",
-              "- 国内外の重要経済イベント",
-              "",
-              "## まとめ",
-              "",
-              "各市場の価格動向をもとに、当日の投資環境を整理します。",
-              "",
-              "---",
-              "※市場データはYahoo Financeから取得しています。",
-              "※1306はTOPIX連動ETFの価格です。",
-              "※本レポートは情報提供を目的としています。"
-          ])
+          table_rows = []
+
+          for i, item in enumerate(rows):
+              bg = "#f1f5f9" if i % 2 == 0 else "#ffffff"
+              color = "#d32f2f" if item["positive"] else "#1976d2"
+
+              table_rows.append(
+                  f"""
+                  <tr style="background:{bg};">
+                    <td style="padding:13px;border-bottom:1px solid #e2e8f0;">
+                      {escape(item['name'])}
+                    </td>
+                    <td style="padding:13px;text-align:right;border-bottom:1px solid #e2e8f0;">
+                      {escape(item['price'])}
+                    </td>
+                    <td style="padding:13px;text-align:right;border-bottom:1px solid #e2e8f0;color:{color};font-weight:bold;">
+                      {escape(item['change'])}
+                    </td>
+                  </tr>
+                  """
+              )
+
+          table_html = "\n".join(table_rows)
+
+          body = f"""
+          <div style="max-width:800px;margin:0 auto;font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-serif;color:#263238;line-height:1.8;">
+
+            <div style="background:#142d4e;color:#ffffff;padding:28px 22px;border-radius:8px;margin-bottom:22px;">
+              <div style="font-size:13px;letter-spacing:2px;color:#cbd5e1;">MARKET REPORT</div>
+              <h1 style="font-size:25px;margin:8px 0;color:#ffffff;">日本株・マーケットレポート</h1>
+              <p style="font-size:14px;margin:0;color:#e2e8f0;">
+                {now:%Y年%m月%d日 %H:%M} 更新（日本時間）
+              </p>
+            </div>
+
+            <h2 style="font-size:20px;color:#142d4e;border-left:5px solid #d5a84b;padding:8px 12px;">
+              主要市場データ
+            </h2>
+
+            <div style="overflow-x:auto;margin:18px 0;">
+              <table style="width:100%;border-collapse:collapse;font-size:14px;">
+                <thead>
+                  <tr style="background:#142d4e;color:#ffffff;">
+                    <th style="padding:14px;text-align:left;">市場・指標</th>
+                    <th style="padding:14px;text-align:right;">終値・価格</th>
+                    <th style="padding:14px;text-align:right;">前日比</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {table_html}
+                </tbody>
+              </table>
+            </div>
+
+            <h2 style="font-size:20px;color:#142d4e;border-left:5px solid #d5a84b;padding:8px 12px;margin-top:30px;">
+              本日の市場チェック
+            </h2>
+
+            <h3 style="color:#142d4e;">国内市場</h3>
+            <p>日経平均とTOPIX連動ETFの価格動向を確認します。国内株式市場の方向性や主要銘柄への影響を整理します。</p>
+
+            <h3 style="color:#142d4e;">米国市場</h3>
+            <p>NYダウ、S&amp;P500、NASDAQの動向から、米国株式市場の地合いを確認します。</p>
+
+            <h3 style="color:#142d4e;">為替市場</h3>
+            <p>ドル円の変動を確認し、輸出関連企業や国内株式市場への影響を整理します。</p>
+
+            <h2 style="font-size:20px;color:#142d4e;border-left:5px solid #d5a84b;padding:8px 12px;margin-top:30px;">
+              本日の注目ポイント
+            </h2>
+
+            <ul style="padding-left:22px;">
+              <li>国内株式市場の方向性</li>
+              <li>米国株式市場の動向</li>
+              <li>ドル円の変動</li>
+              <li>国内外の重要経済イベント</li>
+            </ul>
+
+            <h2 style="font-size:20px;color:#142d4e;border-left:5px solid #d5a84b;padding:8px 12px;margin-top:30px;">
+              まとめ
+            </h2>
+
+            <p>主要市場の価格動向をもとに、国内外の投資環境を整理しました。各指標の変化を確認しながら、今後の市場動向を注視します。</p>
+
+            <div style="margin-top:35px;padding:16px;background:#f1f5f9;border-radius:6px;font-size:12px;color:#64748b;">
+              ※市場データはYahoo Financeから取得しています。<br>
+              ※1306はTOPIX連動ETFの価格です。<br>
+              ※前日比は取得した直近2営業日の終値を比較しています。<br>
+              ※本レポートは情報提供を目的としています。
+            </div>
+
+          </div>
+          """
 
           ATOM = "http://www.w3.org/2005/Atom"
           APP = "http://www.w3.org/2007/app"
@@ -140,7 +202,7 @@ jobs:
           content = ET.SubElement(
               entry,
               f"{{{ATOM}}}content",
-              {"type": "text/plain"}
+              {"type": "html"}
           )
           content.text = body
 
@@ -160,8 +222,6 @@ jobs:
 
           if not api_key or not domain:
               raise RuntimeError("GitHub Secretsの設定を確認してください")
-
-          api_key.encode("ascii")
 
           credentials = base64.b64encode(
               f"Pisao:{api_key}".encode("ascii")
@@ -191,5 +251,5 @@ jobs:
               print(e.read().decode("utf-8", errors="replace")[:2000])
               raise
 
-          print("下書き投稿に成功しました:", title)
+          print("HTML形式の下書き投稿に成功しました:", title)
           PY
