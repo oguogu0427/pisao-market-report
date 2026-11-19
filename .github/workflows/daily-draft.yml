@@ -1,31 +1,25 @@
 
-name: Hatena Blog Draft
+name: Japanese Market Report - Hatena Draft
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '30 22 * * 0-4'
+    inputs:
+      report_html:
+        description: "ChatGPTで作成した既定フォーマットのHTML"
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 jobs:
-  save-draft:
+  hatena-draft:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Check report
-        run: |
-          test -s reports/latest-report.html || {
-            echo "reports/latest-report.html is empty or missing"
-            exit 1
-          }
-
-      - name: Save Hatena draft
+      - name: Save report to Hatena
         env:
+          REPORT_HTML: ${{ inputs.report_html }}
           OWNER_API_KEY: ${{ secrets.OWNER_API_KEY }}
           BLOG_DOMAIN: ${{ secrets.BLOG_DOMAIN }}
         run: |
@@ -38,36 +32,34 @@ jobs:
           import urllib.error
           import xml.etree.ElementTree as ET
 
+          report = os.environ["REPORT_HTML"]
+          api_key = os.environ["OWNER_API_KEY"]
+          domain = os.environ["BLOG_DOMAIN"]
+
+          if not report.strip():
+              sys.exit("HTML report is empty")
+
           class TitleParser(html.parser.HTMLParser):
               def __init__(self):
                   super().__init__()
                   self.title = ""
-                  self.inside = False
+                  self.active = False
 
               def handle_starttag(self, tag, attrs):
                   if tag.lower() == "title":
-                      self.inside = True
+                      self.active = True
 
               def handle_endtag(self, tag):
                   if tag.lower() == "title":
-                      self.inside = False
+                      self.active = False
 
               def handle_data(self, data):
-                  if self.inside:
+                  if self.active:
                       self.title += data
 
-          with open("reports/latest-report.html", encoding="utf-8") as f:
-              report_html = f.read()
-
           parser = TitleParser()
-          parser.feed(report_html)
+          parser.feed(report)
           title = parser.title.strip() or "日本株 朝の相場レポート"
-
-          api_key = os.environ["OWNER_API_KEY"]
-          domain = os.environ["BLOG_DOMAIN"]
-
-          if not api_key or not domain:
-              sys.exit("Hatena credentials are missing")
 
           atom = "http://www.w3.org/2005/Atom"
           app = "http://www.w3.org/2007/app"
@@ -86,10 +78,13 @@ jobs:
               entry,
               f"{{{atom}}}content",
               {"type": "text/html"}
-          ).text = report_html
+          ).text = report
 
           control = ET.SubElement(entry, f"{{{app}}}control")
-          ET.SubElement(control, f"{{{app}}}draft").text = "yes"
+          ET.SubElement(
+              control,
+              f"{{{app}}}draft"
+          ).text = "yes"
 
           body = ET.tostring(
               entry,
@@ -97,19 +92,17 @@ jobs:
               xml_declaration=True
           )
 
-          endpoint = (
-              f"https://blog.hatena.ne.jp/Pisao/{domain}/atom/entry"
-          )
+          url = f"https://blog.hatena.ne.jp/Pisao/{domain}/atom/entry"
 
-          token = base64.b64encode(
+          credentials = base64.b64encode(
               f"Pisao:{api_key}".encode()
           ).decode()
 
           request = urllib.request.Request(
-              endpoint,
+              url,
               data=body,
               headers={
-                  "Authorization": f"Basic {token}",
+                  "Authorization": f"Basic {credentials}",
                   "Content-Type": "application/atom+xml; charset=utf-8"
               },
               method="POST"
@@ -117,7 +110,8 @@ jobs:
 
           try:
               with urllib.request.urlopen(request, timeout=60) as response:
-                  print("Hatena draft saved:", response.status)
+                  print("Hatena draft saved successfully.")
+                  print("HTTP status:", response.status)
           except urllib.error.HTTPError as error:
               print("Hatena API error:", error.code)
               print(error.read().decode("utf-8", errors="replace"))
