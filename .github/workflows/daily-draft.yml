@@ -1,0 +1,27 @@
+
+name: Daily Hatena Draft
+
+on:
+  schedule:
+    - cron: '30 22 * * 0-4'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  create-draft:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create daily draft
+        env:
+          HATENA_API_KEY: ${{ secrets.OWNER_API_KEY }}
+          BLOG_DOMAIN: pisao.hatenablog.com
+          BLOG_OWNER: Pisao
+        run: |
+          echo "Hatena draft workflow is ready."
+          echo "Blog: ${BLOG_OWNER}/${BLOG_DOMAIN}"
+          echo "API key configured: $([ -n "$HATENA_API_KEY" ] && echo yes || echo no)"
