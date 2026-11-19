@@ -1,108 +1,35 @@
-
-name: Daily Hatena Market Report
+name: Receive Japanese Market Report
 
 on:
   repository_dispatch:
-    types: [market_report_ready]
+    types: [hatena-draft]
+
   workflow_dispatch:
 
-permissions:
-  contents: read
-
-concurrency:
-  group: daily-hatena-market-report
-  cancel-in-progress: false
-
 jobs:
-  create-report:
+  receive-report:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
 
     steps:
-      - name: Install Python dependencies
-        run: pip install requests
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: Save ChatGPT report to Hatena draft
+      - name: Save report HTML
         env:
-          OWNER_API_KEY: ${{ secrets.OWNER_API_KEY }}
-          BLOG_DOMAIN: ${{ secrets.BLOG_DOMAIN }}
           REPORT_HTML: ${{ github.event.client_payload.html }}
-          REPORT_TITLE: ${{ github.event.client_payload.title }}
         run: |
-          python - <<'PY'
-          import os
-          import requests
-          import xml.etree.ElementTree as ET
+          if [ -z "$REPORT_HTML" ]; then
+            echo "HTML report is empty"
+            exit 1
+          fi
 
-          html = os.environ.get("REPORT_HTML", "").strip()
-          title = os.environ.get(
-              "REPORT_TITLE", "日本株朝刊レポート"
-          )
+          mkdir -p reports
+          printf '%s' "$REPORT_HTML" > reports/latest-report.html
 
-          if not html:
-              raise RuntimeError("受信したHTMLが空です")
-
-          if not os.environ.get("OWNER_API_KEY"):
-              raise RuntimeError("OWNER_API_KEYが未設定です")
-
-          if not os.environ.get("BLOG_DOMAIN"):
-              raise RuntimeError("BLOG_DOMAINが未設定です")
-
-          atom = "http://www.w3.org/2005/Atom"
-          app = "http://www.w3.org/2007/app"
-
-          ET.register_namespace("", atom)
-          ET.register_namespace("app", app)
-
-          entry = ET.Element(f"{{{atom}}}entry")
-          ET.SubElement(
-              entry, f"{{{atom}}}title"
-          ).text = title
-
-          content = ET.SubElement(
-              entry,
-              f"{{{atom}}}content",
-              {"type": "text/html"}
-          )
-          content.text = html
-
-          control = ET.SubElement(
-              entry, f"{{{app}}}control"
-          )
-          ET.SubElement(
-              control, f"{{{app}}}draft"
-          ).text = "yes"
-
-          xml_body = ET.tostring(
-              entry,
-              encoding="utf-8",
-              xml_declaration=True
-          )
-
-          domain = os.environ["BLOG_DOMAIN"].strip().strip("/")
-          endpoint = (
-              f"https://blog.hatena.ne.jp/Pisao/"
-              f"{domain}/atom/entry"
-          )
-
-          response = requests.post(
-              endpoint,
-              data=xml_body,
-              headers={
-                  "Content-Type":
-                  "application/atom+xml; charset=utf-8"
-              },
-              auth=(
-                  "Pisao",
-                  os.environ["OWNER_API_KEY"]
-              ),
-              timeout=60
-          )
-
-          response.raise_for_status()
-
-          print("Hatena下書き保存成功")
-          print("タイトル:", title)
-          print("HTML文字数:", len(html))
-          print("HTTP:", response.status_code)
-          PY
+      - name: Commit report
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add reports/latest-report.html
+          git commit -m "Update morning market report" || echo "No changes"
+          git push
