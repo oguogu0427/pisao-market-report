@@ -1,13 +1,10 @@
 
-name: Japanese Market Report - Hatena Draft
+name: Japanese Market Report
 
 on:
   workflow_dispatch:
-    inputs:
-      report_html:
-        description: "ChatGPTで作成した既定フォーマットのHTML"
-        required: true
-        type: string
+  schedule:
+    - cron: '30 22 * * 0-4'
 
 permissions:
   contents: read
@@ -17,9 +14,17 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Save report to Hatena
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Load report
+        id: report
+        run: |
+          test -s report.html
+          echo "Report HTML found."
+
+      - name: Publish Hatena draft
         env:
-          REPORT_HTML: ${{ inputs.report_html }}
           OWNER_API_KEY: ${{ secrets.OWNER_API_KEY }}
           BLOG_DOMAIN: ${{ secrets.BLOG_DOMAIN }}
         run: |
@@ -32,14 +37,13 @@ jobs:
           import urllib.error
           import xml.etree.ElementTree as ET
 
-          report = os.environ["REPORT_HTML"]
-          api_key = os.environ["OWNER_API_KEY"]
-          domain = os.environ["BLOG_DOMAIN"]
+          with open("report.html", encoding="utf-8") as f:
+              report = f.read()
 
           if not report.strip():
-              sys.exit("HTML report is empty")
+              sys.exit("Report is empty")
 
-          class TitleParser(html.parser.HTMLParser):
+          class Parser(html.parser.HTMLParser):
               def __init__(self):
                   super().__init__()
                   self.title = ""
@@ -57,52 +61,49 @@ jobs:
                   if self.active:
                       self.title += data
 
-          parser = TitleParser()
+          parser = Parser()
           parser.feed(report)
           title = parser.title.strip() or "日本株 朝の相場レポート"
 
           atom = "http://www.w3.org/2005/Atom"
           app = "http://www.w3.org/2007/app"
-
           ET.register_namespace("", atom)
           ET.register_namespace("app", app)
 
           entry = ET.Element(f"{{{atom}}}entry")
-
           ET.SubElement(entry, f"{{{atom}}}title").text = title
 
           author = ET.SubElement(entry, f"{{{atom}}}author")
           ET.SubElement(author, f"{{{atom}}}name").text = "Pisao"
 
           ET.SubElement(
-              entry,
-              f"{{{atom}}}content",
+              entry, f"{{{atom}}}content",
               {"type": "text/html"}
           ).text = report
 
           control = ET.SubElement(entry, f"{{{app}}}control")
-          ET.SubElement(
-              control,
-              f"{{{app}}}draft"
-          ).text = "yes"
+          ET.SubElement(control, f"{{{app}}}draft").text = "yes"
 
           body = ET.tostring(
-              entry,
-              encoding="utf-8",
-              xml_declaration=True
+              entry, encoding="utf-8", xml_declaration=True
           )
 
-          url = f"https://blog.hatena.ne.jp/Pisao/{domain}/atom/entry"
+          domain = os.environ["BLOG_DOMAIN"]
+          key = os.environ["OWNER_API_KEY"]
 
-          credentials = base64.b64encode(
-              f"Pisao:{api_key}".encode()
+          endpoint = (
+              f"https://blog.hatena.ne.jp/Pisao/{domain}/atom/entry"
+          )
+
+          token = base64.b64encode(
+              f"Pisao:{key}".encode()
           ).decode()
 
           request = urllib.request.Request(
-              url,
+              endpoint,
               data=body,
               headers={
-                  "Authorization": f"Basic {credentials}",
+                  "Authorization": f"Basic {token}",
                   "Content-Type": "application/atom+xml; charset=utf-8"
               },
               method="POST"
@@ -110,8 +111,7 @@ jobs:
 
           try:
               with urllib.request.urlopen(request, timeout=60) as response:
-                  print("Hatena draft saved successfully.")
-                  print("HTTP status:", response.status)
+                  print("Hatena draft saved:", response.status)
           except urllib.error.HTTPError as error:
               print("Hatena API error:", error.code)
               print(error.read().decode("utf-8", errors="replace"))
