@@ -1,5 +1,5 @@
 
-name: Japanese Market Report
+name: Japanese Stock Market Report - Hatena Draft
 
 on:
   workflow_dispatch:
@@ -11,77 +11,38 @@ permissions:
 
 jobs:
   post-to-hatena:
+    name: Post report to Hatena Draft
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Check HTML report
+      - name: Verify report HTML
         run: |
-          if [ ! -f report.html ]; then
-            echo "report.html が見つかりません"
-            exit 1
-          fi
-
           if [ ! -s report.html ]; then
-            echo "report.html が空です"
+            echo "Error: report.html is missing or empty."
             exit 1
           fi
 
-      - name: Post HTML as Hatena draft
+      - name: Create Hatena draft
         env:
           OWNER_API_KEY: ${{ secrets.OWNER_API_KEY }}
           BLOG_DOMAIN: ${{ secrets.BLOG_DOMAIN }}
         run: |
-          python3 <<'PY'
+          python3 - <<'PY'
           import os
           import base64
           import urllib.request
-          import urllib.error
           import xml.etree.ElementTree as ET
-          from html.parser import HTMLParser
-          from datetime import datetime, timezone, timedelta
 
-          class TitleParser(HTMLParser):
-              def __init__(self):
-                  super().__init__()
-                  self.in_title = False
-                  self.title = []
+          api_key = os.environ["OWNER_API_KEY"]
+          blog_domain = os.environ["BLOG_DOMAIN"]
 
-              def handle_starttag(self, tag, attrs):
-                  if tag.lower() == "title":
-                      self.in_title = True
-
-              def handle_endtag(self, tag):
-                  if tag.lower() == "title":
-                      self.in_title = False
-
-              def handle_data(self, data):
-                  if self.in_title:
-                      self.title.append(data)
-
-          with open("report.html", "r", encoding="utf-8") as f:
+          with open("report.html", encoding="utf-8") as f:
               html = f.read()
 
-          parser = TitleParser()
-          parser.feed(html)
-
-          jst = timezone(timedelta(hours=9))
-          today = datetime.now(jst).strftime("%Y-%m-%d")
-          title = "".join(parser.title).strip()
-
-          if not title:
-              title = f"日本株 朝の相場レポート {today}"
-
-          owner = "Pisao"
-          api_key = os.environ["OWNER_API_KEY"]
-          domain = os.environ["BLOG_DOMAIN"]
-
-          endpoint = (
-              f"https://blog.hatena.ne.jp/"
-              f"{owner}/{domain}/atom/entry"
-          )
+          title = "日本株 朝の相場レポート"
 
           atom = "http://www.w3.org/2005/Atom"
           app = "http://www.w3.org/2007/app"
@@ -91,58 +52,52 @@ jobs:
 
           entry = ET.Element(f"{{{atom}}}entry")
 
-          ET.SubElement(
+          title_element = ET.SubElement(
               entry, f"{{{atom}}}title"
-          ).text = title
+          )
+          title_element.text = title
 
           content = ET.SubElement(
-              entry, f"{{{atom}}}content",
-              {"type": "text/html"}
+              entry, f"{{{atom}}}content"
           )
+          content.set("type", "text/html")
           content.text = html
 
           control = ET.SubElement(
               entry, f"{{{app}}}control"
           )
-          ET.SubElement(
+          draft = ET.SubElement(
               control, f"{{{app}}}draft"
-          ).text = "yes"
+          )
+          draft.text = "yes"
 
-          body = ET.tostring(
+          payload = ET.tostring(
               entry,
               encoding="utf-8",
               xml_declaration=True
           )
 
-          credentials = base64.b64encode(
-              f"{owner}:{api_key}".encode()
+          url = (
+              "https://blog.hatena.ne.jp/Pisao/"
+              + blog_domain
+              + "/atom/entry"
+          )
+
+          token = base64.b64encode(
+              f"Pisao:{api_key}".encode()
           ).decode()
 
           request = urllib.request.Request(
-              endpoint,
-              data=body,
+              url,
+              data=payload,
               headers={
-                  "Authorization": f"Basic {credentials}",
-                  "Content-Type":
-                      "application/atom+xml;type=entry;charset=utf-8"
+                  "Authorization": "Basic " + token,
+                  "Content-Type": "application/atom+xml; charset=utf-8"
               },
               method="POST"
           )
 
-          try:
-              with urllib.request.urlopen(
-                  request, timeout=30
-              ) as response:
-                  print("Hatena draft saved successfully.")
-                  print("HTTP status:", response.status)
-                  print("Title:", title)
-
-          except urllib.error.HTTPError as e:
-              print("Hatena API error:", e.code)
-              print(e.read().decode("utf-8", errors="replace"))
-              raise
-
-          except Exception as e:
-              print("Posting failed:", str(e))
-              raise
+          with urllib.request.urlopen(request, timeout=30) as response:
+              print("Hatena API status:", response.status)
+              print(response.read().decode("utf-8"))
           PY
