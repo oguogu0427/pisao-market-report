@@ -1,142 +1,76 @@
-
 name: Japanese Stock Market Report
 
 on:
   workflow_dispatch:
-    inputs:
-      report_html:
-        description: "ChatGPTで作成した日本株レポートのHTMLを貼り付け"
-        required: true
-        type: string
-      report_title:
-        description: "記事タイトル"
-        required: true
-        default: "日本株 朝の相場レポート"
-        type: string
-
   schedule:
+    # 平日 07:30（日本時間）
     - cron: '30 22 * * 0-4'
 
 permissions:
   contents: read
 
+concurrency:
+  group: japanese-stock-market-report
+  cancel-in-progress: false
+
 jobs:
-  post-to-hatena:
-    name: Post Japanese Stock Market Report
+  save-hatena-draft:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Prepare report
-        env:
-          REPORT_HTML_INPUT: ${{ inputs.report_html }}
-          REPORT_TITLE: ${{ inputs.report_title }}
-          EVENT_NAME: ${{ github.event_name }}
+      - name: Check report.html
         run: |
-          python3 - <<'PY'
-          import os
-          import pathlib
+          if [ ! -s report.html ]; then
+            echo "report.html が見つかりません。"
+            exit 1
+          fi
 
-          html = os.environ.get("REPORT_HTML_INPUT", "")
-          title = os.environ.get("REPORT_TITLE", "日本株 朝の相場レポート")
-
-          if os.environ["EVENT_NAME"] == "workflow_dispatch":
-              if not html.strip():
-                  raise SystemExit("レポートHTMLが空です")
-          else:
-              path = pathlib.Path("report.html")
-              if not path.is_file():
-                  raise SystemExit("定期実行用のreport.htmlがありません")
-              html = path.read_text(encoding="utf-8")
-
-          pathlib.Path("/tmp/report.html").write_text(
-              html, encoding="utf-8"
-          )
-          pathlib.Path("/tmp/report-title.txt").write_text(
-              title, encoding="utf-8"
-          )
-
-          print("レポートHTMLを準備しました")
-          PY
-
-      - name: Post draft to Hatena
+      - name: Create Hatena AtomPub entry
         env:
-          OWNER_API_KEY: ${{ secrets.OWNER_API_KEY }}
+          TZ: Asia/Tokyo
+        run: |
+          set -euo pipefail
+
+          TITLE="日本株 朝の相場レポート $(date +'%Y年%m月%d日')"
+
+          {
+            printf '%s\n' \
+              '<?xml version="1.0" encoding="utf-8"?>' \
+              '<entry xmlns="http://www.w3.org/2005/Atom" xmlns:app="http://www.w3.org/2007/app">'
+
+            printf '  <title>%s</title>\n' "$TITLE"
+
+            printf '%s\n' \
+              '  <author><name>ChatGPT</name></author>' \
+              '  <content type="text/html"><![CDATA['
+
+            cat report.html
+
+            printf '%s\n' \
+              ']]></content>' \
+              '  <app:control><app:draft>yes</app:draft></app:control>' \
+              '</entry>'
+          } > hatena-entry.xml
+
+      - name: Save HTML draft to Hatena
+        env:
+          HATENA_USER: Pisao
+          HATENA_API_KEY: ${{ secrets.OWNER_API_KEY }}
           BLOG_DOMAIN: ${{ secrets.BLOG_DOMAIN }}
         run: |
-          python3 - <<'PY'
-          import os
-          import base64
-          import pathlib
-          import urllib.request
-          import xml.etree.ElementTree as ET
+          set -euo pipefail
 
-          api_key = os.environ["OWNER_API_KEY"]
-          blog_domain = os.environ["BLOG_DOMAIN"]
+          if [ -z "$HATENA_API_KEY" ] || [ -z "$BLOG_DOMAIN" ]; then
+            echo "Hatena接続用Secretsを確認してください。"
+            exit 1
+          fi
 
-          html = pathlib.Path("/tmp/report.html").read_text(
-              encoding="utf-8"
-          )
-          title = pathlib.Path("/tmp/report-title.txt").read_text(
-              encoding="utf-8"
-          )
-
-          atom = "http://www.w3.org/2005/Atom"
-          app = "http://www.w3.org/2007/app"
-
-          ET.register_namespace("", atom)
-          ET.register_namespace("app", app)
-
-          entry = ET.Element(f"{{{atom}}}entry")
-
-          title_element = ET.SubElement(
-              entry, f"{{{atom}}}title"
-          )
-          title_element.text = title
-
-          content = ET.SubElement(
-              entry, f"{{{atom}}}content"
-          )
-          content.set("type", "text/html")
-          content.text = html
-
-          control = ET.SubElement(
-              entry, f"{{{app}}}control"
-          )
-          draft = ET.SubElement(
-              control, f"{{{app}}}draft"
-          )
-          draft.text = "yes"
-
-          payload = ET.tostring(
-              entry,
-              encoding="utf-8",
-              xml_declaration=True
-          )
-
-          url = (
-              "https://blog.hatena.ne.jp/Pisao/"
-              + blog_domain
-              + "/atom/entry"
-          )
-
-          credentials = base64.b64encode(
-              f"Pisao:{api_key}".encode("utf-8")
-          ).decode("ascii")
-
-          request = urllib.request.Request(
-              url,
-              data=payload,
-              headers={
-                  "Authorization": f"Basic {credentials}",
-                  "Content-Type": "application/atom+xml; charset=utf-8"
-              },
-              method="POST"
-          )
-
-          with urllib.request.urlopen(request, timeout=30) as response:
-              print("Hatena API status:", response.status)
-              print(response.read().decode("utf-8"))
-          PY
+          curl --fail-with-body --silent --show-error \
+            --user "${HATENA_USER}:${HATENA_API_KEY}" \
+            --request POST \
+            --header "Content-Type: application/atom+xml; charset=utf-8" \
+            --data-binary @hatena-entry.xml \
+            "https://blog.hatena.ne.jp/${HATENA_USER}/${BLOG_DOMAIN}/atom/entry"
