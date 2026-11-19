@@ -1,8 +1,19 @@
 
-name: Japanese Stock Market Report - Hatena Draft
+name: Japanese Stock Market Report
 
 on:
   workflow_dispatch:
+    inputs:
+      report_html:
+        description: "ChatGPTで作成した日本株レポートのHTMLを貼り付け"
+        required: true
+        type: string
+      report_title:
+        description: "記事タイトル"
+        required: true
+        default: "日本株 朝の相場レポート"
+        type: string
+
   schedule:
     - cron: '30 22 * * 0-4'
 
@@ -11,21 +22,46 @@ permissions:
 
 jobs:
   post-to-hatena:
-    name: Post report to Hatena Draft
+    name: Post Japanese Stock Market Report
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Verify report HTML
+      - name: Prepare report
+        env:
+          REPORT_HTML_INPUT: ${{ inputs.report_html }}
+          REPORT_TITLE: ${{ inputs.report_title }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
-          if [ ! -s report.html ]; then
-            echo "Error: report.html is missing or empty."
-            exit 1
-          fi
+          python3 - <<'PY'
+          import os
+          import pathlib
 
-      - name: Create Hatena draft
+          html = os.environ.get("REPORT_HTML_INPUT", "")
+          title = os.environ.get("REPORT_TITLE", "日本株 朝の相場レポート")
+
+          if os.environ["EVENT_NAME"] == "workflow_dispatch":
+              if not html.strip():
+                  raise SystemExit("レポートHTMLが空です")
+          else:
+              path = pathlib.Path("report.html")
+              if not path.is_file():
+                  raise SystemExit("定期実行用のreport.htmlがありません")
+              html = path.read_text(encoding="utf-8")
+
+          pathlib.Path("/tmp/report.html").write_text(
+              html, encoding="utf-8"
+          )
+          pathlib.Path("/tmp/report-title.txt").write_text(
+              title, encoding="utf-8"
+          )
+
+          print("レポートHTMLを準備しました")
+          PY
+
+      - name: Post draft to Hatena
         env:
           OWNER_API_KEY: ${{ secrets.OWNER_API_KEY }}
           BLOG_DOMAIN: ${{ secrets.BLOG_DOMAIN }}
@@ -33,16 +69,19 @@ jobs:
           python3 - <<'PY'
           import os
           import base64
+          import pathlib
           import urllib.request
           import xml.etree.ElementTree as ET
 
           api_key = os.environ["OWNER_API_KEY"]
           blog_domain = os.environ["BLOG_DOMAIN"]
 
-          with open("report.html", encoding="utf-8") as f:
-              html = f.read()
-
-          title = "日本株 朝の相場レポート"
+          html = pathlib.Path("/tmp/report.html").read_text(
+              encoding="utf-8"
+          )
+          title = pathlib.Path("/tmp/report-title.txt").read_text(
+              encoding="utf-8"
+          )
 
           atom = "http://www.w3.org/2005/Atom"
           app = "http://www.w3.org/2007/app"
@@ -83,15 +122,15 @@ jobs:
               + "/atom/entry"
           )
 
-          token = base64.b64encode(
-              f"Pisao:{api_key}".encode()
-          ).decode()
+          credentials = base64.b64encode(
+              f"Pisao:{api_key}".encode("utf-8")
+          ).decode("ascii")
 
           request = urllib.request.Request(
               url,
               data=payload,
               headers={
-                  "Authorization": "Basic " + token,
+                  "Authorization": f"Basic {credentials}",
                   "Content-Type": "application/atom+xml; charset=utf-8"
               },
               method="POST"
