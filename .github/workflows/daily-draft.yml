@@ -12,7 +12,7 @@ permissions:
 jobs:
   create-and-save-report:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
       - name: Checkout
@@ -26,27 +26,32 @@ jobs:
       - name: Install packages
         run: |
           python -m pip install --upgrade pip
-          pip install yfinance requests
+          pip install requests yfinance
 
-      - name: Create market report
+      - name: Generate report and save to Hatena
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OWNER_API_KEY: ${{ secrets.OWNER_API_KEY }}
+          BLOG_DOMAIN: ${{ secrets.BLOG_DOMAIN }}
         run: |
-          cat > create_report.py <<'PY'
+          cat > report.py <<'PY'
           import os
+          import sys
           import json
+          import base64
           import requests
           import yfinance as yf
+          import xml.etree.ElementTree as ET
           from datetime import datetime
           from zoneinfo import ZoneInfo
-          from html import escape
+          from html.parser import HTMLParser
 
           JST = ZoneInfo("Asia/Tokyo")
           now = datetime.now(JST)
           date_text = now.strftime("%Y年%m月%d日")
-          date_iso = now.strftime("%Y-%m-%d")
 
-          tickers = {
+          # 1. 市場データ取得
+          symbols = {
               "日経平均": "^N225",
               "TOPIX連動ETF": "1306.T",
               "NYダウ": "^DJI",
@@ -55,53 +60,46 @@ jobs:
               "ドル円": "JPY=X"
           }
 
-          market_data = {}
+          market = {}
 
-          for name, symbol in tickers.items():
+          for name, symbol in symbols.items():
               try:
-                  hist = yf.Ticker(symbol).history(period="5d")
-                  if hist.empty:
-                      market_data[name] = {"status": "データ取得不可"}
-                      continue
+                  data = yf.Ticker(symbol).history(period="5d")
+                  if data.empty:
+                      raise ValueError("データなし")
 
-                  latest = hist.iloc[-1]
-                  previous = hist.iloc[-2] if len(hist) >= 2 else latest
+                  latest = data.iloc[-1]
+                  previous = data.iloc[-2] if len(data) >= 2 else latest
 
                   close = float(latest["Close"])
-                  prev_close = float(previous["Close"])
-                  change = close - prev_close
-                  change_pct = (
-                      change / prev_close * 100
-                      if prev_close else 0
-                  )
+                  prev = float(previous["Close"])
 
-                  market_data[name] = {
-                      "date": str(hist.index[-1].date()),
-                      "close": round(close, 3),
-                      "change": round(change, 3),
-                      "change_percent": round(change_pct, 2),
-                      "volume": int(latest["Volume"])
+                  market[name] = {
+                      "終値": round(close, 3),
+                      "前日比": round(close - prev, 3),
+                      "騰落率": round(
+                          (close - prev) / prev * 100, 2
+                      ) if prev else 0,
+                      "日付": str(data.index[-1].date())
                   }
-
               except Exception as e:
-                  market_data[name] = {
-                      "status": "取得エラー",
-                      "detail": str(e)
-                  }
+                  market[name] = {"取得状況": str(e)}
 
-          if not any("close" in v for v in market_data.values()):
-              raise RuntimeError("市場データを取得できませんでした")
+          if not any("終値" in x for x in market.values()):
+              raise RuntimeError("市場データ取得に失敗しました")
 
+          # 2. レポート生成
           prompt = f"""
-          あなたは日本株市場を専門とするプロのマーケットアナリストです。
+          本日の日付：{date_text}
 
-          {date_text} 朝刊向けの日本株市場レポートを作成してください。
+          市場データ：
+          {json.dumps(market, ensure_ascii=False, indent=2)}
 
-          【市場データ】
-          {json.dumps(market_data, ensure_ascii=False, indent=2)}
+          あなたは日本株市場専門の金融アナリストです。
+          上記データと最新の公開情報を調査し、
+          日本株の朝の相場レポートを作成してください。
 
-          【レポート仕様】
-          次の8章を必ずすべて作成してください。
+          必ず次の8章をすべて作成してください。
 
           1. 昨日の日本市場を振り返る
           2. 本日の日本市場の展望
@@ -112,61 +110,38 @@ jobs:
           7. 本日の注目銘柄10選
           8. 本日のまとめ
 
-          【詳細条件】
+          【内容の条件】
 
-          ・市場データを具体的な数値で分析する。
-          ・前日比、騰落率、為替水準を記載する。
-          ・日本株への影響を具体的に説明する。
-          ・海外市場の動向と日本市場への波及を分析する。
-          ・本日のイベントと決算情報を調査して記載する。
-          ・確認できた情報には情報源のURLを記載する。
-          ・情報が取得できない項目は「情報確認中」と記載する。
-          ・推測を事実として記載しない。
+          ・市場データを数値で具体的に分析する。
+          ・国内外の市場動向を日本株への影響と結び付ける。
+          ・主要イベントと決算情報は日付を明記する。
+          ・イベントと決算は最新情報を検索して確認する。
+          ・取得できない情報は「情報確認中」と記載する。
           ・第7章は上昇期待5銘柄、下落警戒5銘柄。
-          ・各銘柄について、コード、企業名、選定理由、
-            注目材料、警戒材料を具体的に記載する。
-          ・銘柄選定は市場環境と関連付ける。
-          ・抽象的な文章や同じ内容の繰り返しを避ける。
-          ・投資判断に役立つ分析を十分な分量で記載する。
-          ・日本語で執筆する。
+          ・銘柄コード、企業名、選定理由、注目材料、
+            警戒材料を記載する。
+          ・各章は十分な分析量を確保する。
+          ・同じ説明を繰り返さない。
+          ・推測と確認済み情報を区別する。
 
-          【HTML出力条件】
+          【HTML形式】
 
-          HTML本文の断片だけを出力してください。
-          Markdownコードブロックは使用しないでください。
+          HTML本文の断片のみを出力する。
+          Markdownコードブロックは禁止。
 
-          第1章から第8章まで、それぞれ
-          <section class="chapter"> で囲んでください。
-          各章の見出しは <h2> を使用してください。
-          小見出しは <h3> を使用してください。
-          表は <table> を使用してください。
-          重要事項は <div class="point"> で囲んでください。
-          文章は <p>、箇条書きは <ul><li> を使用してください。
+          各章を <section class="chapter"> で囲む。
+          章見出しは <h2>。
+          小見出しは <h3>。
+          表は <table>。
+          本文は <p>。
+          箇条書きは <ul><li>。
+          重要事項は <div class="point"> で囲む。
 
-          第7章は10銘柄を表形式で掲載してください。
+          第7章は10銘柄の表を作成する。
+          8章すべてを省略せず作成する。
           """
-          
-          api_key = os.environ["OPENAI_API_KEY"]
 
-          payload = {
-              "model": "gpt-4.1",
-              "input": [
-                  {
-                      "role": "system",
-                      "content": (
-                          "あなたは正確性と具体性を重視する"
-                          "日本株市場専門の金融アナリストです。"
-                      )
-                  },
-                  {
-                      "role": "user",
-                      "content": prompt
-                  }
-              ],
-              "tools": [
-                  {"type": "web_search_preview"}
-              ]
-          }
+          api_key = os.environ["OPENAI_API_KEY"]
 
           response = requests.post(
               "https://api.openai.com/v1/responses",
@@ -174,30 +149,35 @@ jobs:
                   "Authorization": f"Bearer {api_key}",
                   "Content-Type": "application/json"
               },
-              json=payload,
+              json={
+                  "model": "gpt-4.1",
+                  "tools": [
+                      {"type": "web_search_preview"}
+                  ],
+                  "input": prompt
+              },
               timeout=300
           )
 
           response.raise_for_status()
           result = response.json()
 
-          parts = []
+          texts = []
           for item in result.get("output", []):
               if item.get("type") == "message":
-                  for content in item.get("content", []):
-                      if content.get("type") == "output_text":
-                          parts.append(content.get("text", ""))
+                  for part in item.get("content", []):
+                      if part.get("type") == "output_text":
+                          texts.append(part.get("text", ""))
 
-          report_body = "\n".join(parts).strip()
+          body = "\n".join(texts).strip()
 
-          if not report_body:
-              raise RuntimeError("レポート本文の生成に失敗しました")
+          if not body:
+              raise RuntimeError("レポート本文が空です")
 
-          if "<section" not in report_body or report_body.count(
-              'class="chapter"'
-          ) < 8:
-              raise RuntimeError("8章構成のHTMLを確認できません")
+          if body.count('class="chapter"') < 8:
+              raise RuntimeError("8章構成を確認できません")
 
+          # 3. HTML整形
           css = """
           body {
             margin: 0;
@@ -212,7 +192,7 @@ jobs:
             max-width: 900px;
             margin: 0 auto;
             padding: 36px;
-            background: #ffffff;
+            background: #fff;
             border-radius: 8px;
           }
           .report-header {
@@ -231,16 +211,12 @@ jobs:
             color: #183b64;
             margin: 12px 0;
           }
-          .date {
-            color: #68778a;
-          }
-          .chapter {
-            margin: 38px 0;
-          }
+          .date { color: #68778a; }
+          .chapter { margin: 38px 0; }
           h2 {
             padding: 12px 16px;
             background: #183b64;
-            color: #ffffff;
+            color: white;
             font-size: 21px;
             border-radius: 4px;
           }
@@ -250,9 +226,7 @@ jobs:
             padding-left: 12px;
             margin-top: 26px;
           }
-          p {
-            margin: 14px 0;
-          }
+          p { margin: 14px 0; }
           table {
             width: 100%;
             border-collapse: collapse;
@@ -274,9 +248,7 @@ jobs:
             padding: 15px 18px;
             margin: 18px 0;
           }
-          li {
-            margin: 7px 0;
-          }
+          li { margin: 7px 0; }
           .disclaimer {
             margin-top: 40px;
             padding-top: 18px;
@@ -310,65 +282,41 @@ jobs:
           <p>国内外の市場動向と本日の投資戦略</p>
           </header>
           <p>[:contents]</p>
-          {report_body}
+          {body}
           <footer class="disclaimer">
           本レポートは情報提供を目的として作成しています。
           投資判断はご自身の責任で行ってください。
           </footer>
           </main>
           </body>
-          </html>
-          """
+          </html>"""
 
           with open("report.html", "w", encoding="utf-8") as f:
               f.write(html)
 
-          print("レポート作成完了:", date_iso)
-          print("HTML文字数:", len(html))
-          PY
+          print("レポート生成完了:", len(html), "文字")
 
-          python create_report.py
-
-      - name: Publish Hatena draft
-        env:
-          OWNER_API_KEY: ${{ secrets.OWNER_API_KEY }}
-          BLOG_DOMAIN: ${{ secrets.BLOG_DOMAIN }}
-        run: |
-          python <<'PY'
-          import os
-          import sys
-          import base64
-          import html.parser
-          import urllib.request
-          import urllib.error
-          import xml.etree.ElementTree as ET
-
-          with open("report.html", encoding="utf-8") as f:
-              report = f.read()
-
-          if not report.strip():
-              sys.exit("Report is empty")
-
-          class Parser(html.parser.HTMLParser):
+          # 4. Hatena下書き保存
+          class TitleParser(HTMLParser):
               def __init__(self):
                   super().__init__()
-                  self.title = ""
                   self.active = False
+                  self.title = ""
 
               def handle_starttag(self, tag, attrs):
-                  if tag.lower() == "title":
+                  if tag == "title":
                       self.active = True
 
               def handle_endtag(self, tag):
-                  if tag.lower() == "title":
+                  if tag == "title":
                       self.active = False
 
               def handle_data(self, data):
                   if self.active:
                       self.title += data
 
-          parser = Parser()
-          parser.feed(report)
+          parser = TitleParser()
+          parser.feed(html)
           title = parser.title.strip()
 
           atom = "http://www.w3.org/2005/Atom"
@@ -378,69 +326,55 @@ jobs:
           ET.register_namespace("app", app)
 
           entry = ET.Element(f"{{{atom}}}entry")
-          ET.SubElement(
-              entry, f"{{{atom}}}title"
-          ).text = title
+          ET.SubElement(entry, f"{{{atom}}}title").text = title
 
-          author = ET.SubElement(
-              entry, f"{{{atom}}}author"
-          )
-          ET.SubElement(
-              author, f"{{{atom}}}name"
-          ).text = "Pisao"
+          author = ET.SubElement(entry, f"{{{atom}}}author")
+          ET.SubElement(entry, f"{{{atom}}}name").text = "Pisao"
 
           ET.SubElement(
               entry,
               f"{{{atom}}}content",
               {"type": "text/html"}
-          ).text = report
+          ).text = html
 
-          control = ET.SubElement(
-              entry, f"{{{app}}}control"
-          )
-          ET.SubElement(
-              control, f"{{{app}}}draft"
-          ).text = "yes"
+          control = ET.SubElement(entry, f"{{{app}}}control")
+          ET.SubElement(control, f"{{{app}}}draft").text = "yes"
 
-          body = ET.tostring(
+          xml_body = ET.tostring(
               entry,
               encoding="utf-8",
               xml_declaration=True
           )
 
-          domain = os.environ["BLOG_DOMAIN"]
-          key = os.environ["OWNER_API_KEY"]
-
-          endpoint = (
-              f"https://blog.hatena.ne.jp/Pisao/{domain}/atom/entry"
-          )
-
           token = base64.b64encode(
-              f"Pisao:{key}".encode()
+              (
+                  "Pisao:" + os.environ["OWNER_API_KEY"]
+              ).encode()
           ).decode()
 
-          request = urllib.request.Request(
-              endpoint,
-              data=body,
-              headers={
-                  "Authorization": f"Basic {token}",
-                  "Content-Type": "application/atom+xml; charset=utf-8"
-              },
-              method="POST"
+          endpoint = (
+              "https://blog.hatena.ne.jp/Pisao/"
+              + os.environ["BLOG_DOMAIN"]
+              + "/atom/entry"
           )
 
-          try:
-              with urllib.request.urlopen(
-                  request, timeout=60
-              ) as response:
-                  print("Hatena draft saved:", response.status)
-                  print(response.read().decode(
-                      "utf-8", errors="replace"
-                  ))
-          except urllib.error.HTTPError as error:
-              print("Hatena API error:", error.code)
-              print(error.read().decode(
-                  "utf-8", errors="replace"
-              ))
+          req = requests.post(
+              endpoint,
+              data=xml_body,
+              headers={
+                  "Authorization": "Basic " + token,
+                  "Content-Type": "application/atom+xml; charset=utf-8"
+              },
+              timeout=60
+          )
+
+          if not req.ok:
+              print("Hatena API error:", req.status_code)
+              print(req.text)
               sys.exit(1)
+
+          print("Hatena下書き保存成功")
+          print(req.text)
           PY
+
+          python report.py
