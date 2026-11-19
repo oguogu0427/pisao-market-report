@@ -6,214 +6,250 @@ on:
     - cron: '30 22 * * 0-4'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: daily-hatena-market-report
+  cancel-in-progress: false
+
 jobs:
-  publish-draft:
+  create-report:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
-      - name: Publish market report
+      - name: Install Python dependencies
+        run: pip install requests
+
+      - name: Generate report and save Hatena draft
         env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OWNER_API_KEY: ${{ secrets.OWNER_API_KEY }}
           BLOG_DOMAIN: ${{ secrets.BLOG_DOMAIN }}
         run: |
-          python - <<'PY'
+          cat > create_report.py <<'PY'
           import os
           import json
-          import base64
-          import urllib.request
-          import urllib.error
+          import html
+          import requests
           import xml.etree.ElementTree as ET
           from datetime import datetime
           from zoneinfo import ZoneInfo
-          from urllib.parse import quote
-          from html import escape
 
           JST = ZoneInfo("Asia/Tokyo")
           now = datetime.now(JST)
+          date_text = now.strftime("%Y年%m月%d日（%A）")
+          date_text = date_text.replace(
+              "Monday", "月曜日"
+          ).replace(
+              "Tuesday", "火曜日"
+          ).replace(
+              "Wednesday", "水曜日"
+          ).replace(
+              "Thursday", "木曜日"
+          ).replace(
+              "Friday", "金曜日"
+          ).replace(
+              "Saturday", "土曜日"
+          ).replace(
+              "Sunday", "日曜日"
+          )
 
-          stocks = [
-              ("日経平均", "^N225"),
-              ("TOPIX連動ETF（1306）", "1306.T"),
-              ("NYダウ", "^DJI"),
-              ("S&P500", "^GSPC"),
-              ("NASDAQ", "^IXIC"),
-              ("ドル円", "JPY=X"),
-          ]
+          # Yahoo Financeから最新の市場データを取得
+          symbols = {
+              "^N225": "日経平均",
+              "1306.T": "TOPIX連動ETF",
+              "^DJI": "NYダウ",
+              "^GSPC": "S&P500",
+              "^IXIC": "NASDAQ",
+              "JPY=X": "ドル円"
+          }
 
-          rows = []
+          market_data = {}
 
-          for name, ticker in stocks:
+          for symbol, label in symbols.items():
               url = (
                   "https://query1.finance.yahoo.com/v8/finance/chart/"
-                  + quote(ticker)
-                  + "?range=5d&interval=1d"
+                  + requests.utils.quote(symbol, safe="")
               )
-              req = urllib.request.Request(
-                  url,
-                  headers={"User-Agent": "Mozilla/5.0"}
-              )
-
               try:
-                  with urllib.request.urlopen(req, timeout=20) as response:
-                      data = json.loads(response.read())
+                  response = requests.get(
+                      url,
+                      params={"range": "5d", "interval": "1d"},
+                      headers={"User-Agent": "Mozilla/5.0"},
+                      timeout=20
+                  )
+                  response.raise_for_status()
+                  result = response.json()["chart"]["result"][0]
+                  meta = result["meta"]
+                  closes = (
+                      result.get("indicators", {})
+                      .get("quote", [{}])[0]
+                      .get("close", [])
+                  )
+                  closes = [x for x in closes if x is not None]
 
-                  result = data["chart"]["result"][0]
-                  closes = [
-                      x for x in result["indicators"]["quote"][0]["close"]
-                      if x is not None
-                  ]
-
-                  if len(closes) < 2:
-                      raise RuntimeError("価格データ不足")
-
-                  latest = closes[-1]
-                  previous = closes[-2]
-                  change = (latest / previous - 1) * 100
-
-                  rows.append({
-                      "name": name,
-                      "price": f"{latest:,.2f}",
-                      "change": f"{change:+.2f}%",
-                      "positive": change >= 0
-                  })
-                  print(f"取得成功: {name}")
-
+                  market_data[label] = {
+                      "symbol": symbol,
+                      "current": meta.get("regularMarketPrice"),
+                      "previous_close": meta.get("chartPreviousClose"),
+                      "recent_closes": closes[-5:]
+                  }
               except Exception as e:
-                  raise RuntimeError(f"{name}の取得に失敗: {e}")
+                  market_data[label] = {
+                      "symbol": symbol,
+                      "取得状況": f"データ取得エラー: {str(e)}"
+                  }
 
-          title = f"日本株・マーケットレポート {now:%Y年%m月%d日}"
+          prompt = f"""
+          あなたは日本株市場を専門とする金融アナリスト兼編集者です。
+          {date_text}の日本株朝刊レポートを作成してください。
 
-          table_rows = []
-          for i, item in enumerate(rows):
-              bg = "#f1f5f9" if i % 2 == 0 else "#ffffff"
-              color = "#d32f2f" if item["positive"] else "#1976d2"
+          【市場データ】
+          {json.dumps(market_data, ensure_ascii=False, indent=2)}
 
-              table_rows.append(f"""
-              <tr style="background:{bg};">
-                <td style="padding:13px;border-bottom:1px solid #e2e8f0;">{escape(item['name'])}</td>
-                <td style="padding:13px;text-align:right;border-bottom:1px solid #e2e8f0;">{escape(item['price'])}</td>
-                <td style="padding:13px;text-align:right;border-bottom:1px solid #e2e8f0;color:{color};font-weight:bold;">{escape(item['change'])}</td>
-              </tr>
-              """)
+          【調査指示】
+          Web検索を活用し、直近の日本市場、米国市場、為替、金利、
+          先物、経済指標、企業決算、政策、地政学関連ニュースを調査してください。
+          本日の日本市場に影響する材料を優先してください。
+          数値や発表時刻は情報源と日付を確認し、確認できた内容を記載してください。
+          取得できない数値は推測で埋めず、その旨を明記してください。
+          株価データとニュースの対象日を明確にしてください。
 
-          table_html = "\n".join(table_rows)
+          【必須フォーマット】
+          完成したHTML全文を出力してください。
+          Markdownやコードフェンス、前置き、解説は出力しないでください。
 
-          body = f"""
-          <div style="max-width:800px;margin:0 auto;font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-serif;color:#263238;line-height:1.8;">
+          タイトル：
+          MARKET MORNING REPORT
+          日本株 朝の相場レポート
+          {date_text}
 
-            <div style="background:#142d4e;color:#ffffff;padding:28px 22px;border-radius:8px;margin-bottom:22px;">
-              <div style="font-size:13px;letter-spacing:2px;color:#cbd5e1;">MARKET REPORT</div>
-              <h1 style="font-size:25px;margin:8px 0;color:#ffffff;">日本株・マーケットレポート</h1>
-              <p style="font-size:14px;margin:0;color:#e2e8f0;">{now:%Y年%m月%d日 %H:%M} 更新（日本時間）</p>
-            </div>
+          以下の8章をすべて作成してください。
 
-            <h2 style="font-size:20px;color:#142d4e;border-left:5px solid #d5a84b;padding:8px 12px;">主要市場データ</h2>
+          1. 昨日の日本市場を振り返る
+             日経平均、TOPIX、業種別動向、売買の特徴。
+          2. 本日の日本市場の展望
+             想定レンジ、上昇・下落材料、寄り付きの注目点。
+          3. 海外市場・為替・先物の動向
+             米国株、ドル円、米金利、日経先物。
+          4. 本日の主要イベント
+             国内外の経済指標、要人発言、政策イベント。
+          5. 本日の決算発表情報
+             発表予定企業、注目点、業績を見るポイント。
+          6. 本日の相場で警戒したいポイント
+             金利、為替、需給、決算、海外情勢など。
+          7. 本日の注目銘柄10選
+             上昇注目5銘柄、下落警戒5銘柄。
+             各銘柄についてコード、注目理由、材料、リスクを記載。
+          8. 本日のまとめ
+             相場全体の見通し、重要価格帯、投資家の行動方針。
 
-            <div style="overflow-x:auto;margin:18px 0;">
-              <table style="width:100%;border-collapse:collapse;font-size:14px;">
-                <thead>
-                  <tr style="background:#142d4e;color:#ffffff;">
-                    <th style="padding:14px;text-align:left;">市場・指標</th>
-                    <th style="padding:14px;text-align:right;">終値・価格</th>
-                    <th style="padding:14px;text-align:right;">前日比</th>
-                  </tr>
-                </thead>
-                <tbody>{table_html}</tbody>
-              </table>
-            </div>
-
-            <h2 style="font-size:20px;color:#142d4e;border-left:5px solid #d5a84b;padding:8px 12px;">本日の市場チェック</h2>
-
-            <h3 style="color:#142d4e;">国内市場</h3>
-            <p>日経平均とTOPIX連動ETFの価格動向を確認します。国内株式市場の方向性や主要銘柄への影響を整理します。</p>
-
-            <h3 style="color:#142d4e;">米国市場</h3>
-            <p>NYダウ、S&amp;P500、NASDAQの動向から、米国株式市場の地合いを確認します。</p>
-
-            <h3 style="color:#142d4e;">為替市場</h3>
-            <p>ドル円の変動を確認し、輸出関連企業や国内株式市場への影響を整理します。</p>
-
-            <h2 style="font-size:20px;color:#142d4e;border-left:5px solid #d5a84b;padding:8px 12px;">本日の注目ポイント</h2>
-            <ul style="padding-left:22px;">
-              <li>国内株式市場の方向性</li>
-              <li>米国株式市場の動向</li>
-              <li>ドル円の変動</li>
-              <li>国内外の重要経済イベント</li>
-            </ul>
-
-            <h2 style="font-size:20px;color:#142d4e;border-left:5px solid #d5a84b;padding:8px 12px;">まとめ</h2>
-            <p>主要市場の価格動向をもとに、国内外の投資環境を整理しました。各指標の変化を確認しながら、今後の市場動向を注視します。</p>
-
-            <div style="margin-top:35px;padding:16px;background:#f1f5f9;border-radius:6px;font-size:12px;color:#64748b;">
-              ※市場データはYahoo Financeから取得しています。<br>
-              ※1306はTOPIX連動ETFの価格です。<br>
-              ※前日比は取得した直近2営業日の終値を比較しています。<br>
-              ※本レポートは情報提供を目的としています。
-            </div>
-          </div>
+          【品質・デザイン】
+          ・各章は具体的な情報と分析を含む十分な分量にする。
+          ・見出し、表、箇条書き、強調表示を活用する。
+          ・冒頭に要約と本日の重要ポイントを掲載する。
+          ・目次としてHatena記法の [:contents] を入れる。
+          ・スマートフォンでも読みやすいCSSを含める。
+          ・背景、見出し、表、注意事項を整えた読みやすいデザインにする。
+          ・銘柄コードと企業名を正確に記載する。
+          ・根拠のない株価予想や架空のニュースを作らない。
+          ・末尾に投資判断に関する免責事項を記載する。
+          ・HTMLはHatena Blogの記事本文として使える形式にする。
+          ・記事タイトルは「日本株朝刊レポート｜{date_text}」とする。
           """
 
-          ATOM = "http://www.w3.org/2005/Atom"
-          APP = "http://www.w3.org/2007/app"
+          # OpenAI Responses APIでレポート生成
+          api_response = requests.post(
+              "https://api.openai.com/v1/responses",
+              headers={
+                  "Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}",
+                  "Content-Type": "application/json"
+              },
+              json={
+                  "model": "gpt-6.2-sol",
+                  "tools": [{"type": "web_search"}],
+                  "input": prompt
+              },
+              timeout=300
+          )
+          api_response.raise_for_status()
+          result = api_response.json()
 
-          ET.register_namespace("", ATOM)
-          ET.register_namespace("app", APP)
+          parts = []
+          for item in result.get("output", []):
+              if item.get("type") == "message":
+                  for content in item.get("content", []):
+                      if content.get("type") == "output_text":
+                          parts.append(content.get("text", ""))
 
-          entry = ET.Element(f"{{{ATOM}}}entry")
-          ET.SubElement(entry, f"{{{ATOM}}}title").text = title
+          report_html = "\n".join(parts).strip()
 
-          author = ET.SubElement(entry, f"{{{ATOM}}}author")
-          ET.SubElement(author, f"{{{ATOM}}}name").text = "Pisao"
+          if not report_html:
+              raise RuntimeError("レポート本文の生成結果が空です")
 
+          report_html = report_html.strip()
+          if report_html.startswith("```"):
+              report_html = report_html.split("\n", 1)[-1]
+              if report_html.endswith("```"):
+                  report_html = report_html[:-3].strip()
+
+          if "<" not in report_html or ">" not in report_html:
+              raise RuntimeError("生成結果がHTML形式ではありません")
+
+          # 生成したHTMLをそのままHatena記事本文へ格納
+          title = f"日本株朝刊レポート｜{date_text}"
+
+          atom = "http://www.w3.org/2005/Atom"
+          app = "http://www.w3.org/2007/app"
+          ET.register_namespace("", atom)
+          ET.register_namespace("app", app)
+
+          entry = ET.Element(f"{{{atom}}}entry")
+          ET.SubElement(entry, f"{{{atom}}}title").text = title
           content = ET.SubElement(
               entry,
-              f"{{{ATOM}}}content",
-              {"type": "html"}
+              f"{{{atom}}}content",
+              {"type": "text/html"}
           )
-          content.text = body
+          content.text = report_html
 
-          control = ET.SubElement(entry, f"{{{APP}}}control")
-          ET.SubElement(control, f"{{{APP}}}draft").text = "yes"
+          control = ET.SubElement(entry, f"{{{app}}}control")
+          ET.SubElement(control, f"{{{app}}}draft").text = "yes"
 
-          xml = ET.tostring(
+          xml_body = ET.tostring(
               entry,
               encoding="utf-8",
               xml_declaration=True
           )
 
-          api_key = os.environ["OWNER_API_KEY"]
-          domain = os.environ["BLOG_DOMAIN"]
-
-          if not api_key or not domain:
-              raise RuntimeError("GitHub Secretsの設定を確認してください")
-
-          credentials = base64.b64encode(
-              f"Pisao:{api_key}".encode("ascii")
-          ).decode("ascii")
-
+          blog_domain = os.environ["BLOG_DOMAIN"].strip().strip("/")
           endpoint = (
               f"https://blog.hatena.ne.jp/Pisao/"
-              f"{domain}/atom/entry"
+              f"{blog_domain}/atom/entry"
           )
 
-          request = urllib.request.Request(
+          post_response = requests.post(
               endpoint,
-              data=xml,
-              method="POST",
+              data=xml_body,
               headers={
-                  "Authorization": f"Basic {credentials}",
                   "Content-Type": "application/atom+xml; charset=utf-8"
-              }
+              },
+              auth=("Pisao", os.environ["OWNER_API_KEY"]),
+              timeout=60
           )
 
-          try:
-              with urllib.request.urlopen(request, timeout=30) as response:
-                  print("Hatena response:", response.status)
-                  print(response.read().decode("utf-8")[:2000])
-          except urllib.error.HTTPError as e:
-              print("投稿エラー:", e.code)
-              print(e.read().decode("utf-8", errors="replace")[:2000])
-              raise
+          if post_response.status_code not in (200, 201):
+              raise RuntimeError(
+                  f"Hatena投稿エラー: {post_response.status_code} "
+                  f"{post_response.text[:1500]}"
+              )
 
-          print("HTML形式の下書き投稿に成功しました:", title)
+          print("Hatena下書き保存成功")
+          print(f"記事タイトル: {title}")
+          print(f"HTML文字数: {len(report_html)}")
+          print(f"Hatena応答: {post_response.status_code}")
           PY
+
+          python create_report.py
